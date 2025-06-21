@@ -112,7 +112,7 @@ run_experiment.ipynb is a notebook used to run a problem.
 ## References
 [1] Buathong, Poompol, et al. "Bayesian Optimization of Function Networks with Partial Evaluations." International Conference on Machine Learning. PMLR, 2024.
 
-[2] Buathong, Poompol and Frazier, Peter I. "Fast Bayesian Optimization of Function Networks with Partial Evaluations." ArXiv
+[2] Buathong, Poompol, and Peter I. Frazier. "Fast Bayesian Optimization of Function Networks with Partial Evaluations." arXiv preprint arXiv:2506.11456 (2025).
 
 [3] Jones, Donald R., Matthias Schonlau, and William J. Welch. "Efficient global optimization of expensive black-box functions." Journal of Global optimization 13 (1998): 455-492.
 
