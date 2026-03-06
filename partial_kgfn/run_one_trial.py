@@ -15,51 +15,152 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from botorch import fit_gpytorch_model
-from botorch.acquisition import ExpectedImprovement
-from botorch.acquisition import PosteriorMean as GPPosteriorMean
-from botorch.acquisition import qExpectedImprovement
-from botorch.acquisition import qKnowledgeGradient as vanillaKG
-from botorch.acquisition import qSimpleRegret
-from botorch.acquisition.objective import GenericMCObjective, MCAcquisitionObjective
 from botorch.logging import logger
-from botorch.models.model import Model
-from botorch.optim import optimize_acqf as botorch_optimize_acqf
-from botorch.optim.optimize import optimize_acqf
-from botorch.sampling.normal import SobolQMCNormalSampler
 from botorch.test_functions import SyntheticTestFunction
 from botorch.utils.sampling import draw_sobol_samples
-from gpytorch.mlls import ExactMarginalLogLikelihood
 from torch import Tensor, normal
-from torch.distributions.multivariate_normal import MultivariateNormal
-
-from partial_kgfn.acquisition.FN_realization import FN_realization
-from partial_kgfn.acquisition.full_kgfn import FullKnowledgeGradientFN
-from partial_kgfn.acquisition.partial_kgfn import PartialKnowledgeGradientFN
-from partial_kgfn.acquisition.tsfn import ThompsonSamplingFN
-from partial_kgfn.models.decoupled_gp_network import (
-    GaussianProcessNetwork,
-    fit_gp_network,
-    initialize_GP,
-)
-from partial_kgfn.optim.discrete_kgfn_optim import (
-    optimize_discrete_acqf_for_function_network,
-)
-from partial_kgfn.test_functions.ack_mat import AckleyMatyasFunctionNetwork
-from partial_kgfn.test_functions.ackley_sin import AckleyFunctionNetwork
-from partial_kgfn.test_functions.freesolv3 import Freesolv3FunctionNetwork
-from partial_kgfn.test_functions.manufacter_gp import ManufacturingGPNetwork
-from partial_kgfn.test_functions.pharmaceutical import PharmaFunctionNetwork
 from partial_kgfn.utils.construct_obs_set import construct_obs_set
-from partial_kgfn.utils.EIFN_optimize_acqf import optimize_acqf_and_get_suggested_point
-from partial_kgfn.utils.gen_batch_x_fantasies import GenbatchXFantasiesFN
-from partial_kgfn.utils.posterior_mean import PosteriorMean
 
 tkwargs = {
     "dtype": torch.double,
     "device": torch.device("cpu"),
 }
 
+from pathlib import Path
+from typing import Any
+
+def _nn_ckpt_dir(results_dir: str) -> str:
+    """
+    Keep NN checkpoints next to results so they share the same experiment key.
+    Example:
+      results_dir = ./results/<exp>/<algo>/
+      ckpt_dir    = ./results/<exp>/<algo>/checkpoints/
+    """
+    ckpt_dir = os.path.join(results_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    return ckpt_dir
+
+def save_nn_checkpoint(
+    *,
+    results_dir: str,
+    trial: int,
+    step: int,
+    predictor: torch.nn.Module,
+    nn_optimizer: Optional[torch.optim.Optimizer] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Save a training-resumable checkpoint (model + optimizer + metadata) using state_dict.
+    """
+    ckpt_dir = _nn_ckpt_dir(results_dir)
+    ckpt_path = os.path.join(ckpt_dir, f"trial_{trial}_step_{step}.pth")
+
+    ckpt = {
+        "trial": trial,
+        "step": step,
+        "predictor_state_dict": predictor.state_dict(),
+    }
+    if nn_optimizer is not None:
+        ckpt["optimizer_state_dict"] = nn_optimizer.state_dict()
+    if extra:
+        ckpt.update(extra)
+
+    torch.save(ckpt, ckpt_path)
+    return ckpt_path
+
+def load_latest_nn_checkpoint(
+    *,
+    results_dir: str,
+    trial: int,
+    predictor: torch.nn.Module,
+    nn_optimizer: Optional[torch.optim.Optimizer] = None,
+    map_location: Optional[Union[str, torch.device]] = "cpu",
+) -> Optional[Dict[str, Any]]:
+    """
+    Load the latest checkpoint for this trial if exists; restores model (+ optimizer if provided).
+    Returns the loaded checkpoint dict, or None if nothing found.
+    """
+    ckpt_dir = os.path.join(results_dir, "checkpoints")
+    if not os.path.isdir(ckpt_dir):
+        return None
+
+    # find all trial_{trial}_step_*.pth and pick max step
+    prefix = f"trial_{trial}_step_"
+    candidates = []
+    for fn in os.listdir(ckpt_dir):
+        if fn.startswith(prefix) and fn.endswith(".pth"):
+            try:
+                step = int(fn[len(prefix) : -len(".pth")])
+                candidates.append((step, fn))
+            except ValueError:
+                pass
+    if not candidates:
+        return None
+
+    step, fn = max(candidates, key=lambda x: x[0])
+    ckpt_path = os.path.join(ckpt_dir, fn)
+    ckpt = torch.load(ckpt_path, map_location=map_location, weights_only=False)
+
+    predictor.load_state_dict(ckpt["predictor_state_dict"])
+    if nn_optimizer is not None and "optimizer_state_dict" in ckpt:
+        nn_optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+    return ckpt
+
+import torch
+import torch.nn.functional as F
+
+def compute_test_loss(
+    predictor,                 # your NN model: maps x -> logits (cls) or y_hat (reg)
+    test_X: torch.Tensor,      # shape [n_te, d]
+    test_y: torch.Tensor,      # shape [n_te] for cls labels, or [n_te, 1] for reg
+    task: str = "regression",  # "classification" or "regression"
+) -> float:
+    """
+    Returns average test loss (scalar float).
+    - classification: CrossEntropyLoss on raw logits
+    - regression: MSELoss
+    """
+    predictor.eval()
+    with torch.no_grad():
+        out = predictor(test_X)
+        if task == "classification":
+            # CrossEntropy expects raw logits and class indices
+            loss = F.cross_entropy(out, test_y.long())
+        else:
+            # regression
+            loss = F.mse_loss(out.view_as(test_y), test_y)
+    return float(loss.item())
+
+def train_predictor_regression(
+    predictor: torch.nn.Module,
+    train_X: torch.Tensor,
+    train_y: torch.Tensor,
+    n_steps: int = 200,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-6,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+):
+    predictor.train()
+    if optimizer is None:
+        optimizer = torch.optim.Adam(
+            predictor.parameters(), lr=lr, weight_decay=weight_decay
+        )
+
+    n = train_X.shape[0]
+    for _ in range(n_steps):
+        idx = torch.randint(0, n, (min(batch_size, n),))
+        xb = train_X[idx]
+        yb = train_y[idx]
+
+        optimizer.zero_grad()
+        pred = predictor(xb)
+        loss = F.mse_loss(pred.view_as(yb), yb)
+        loss.backward()
+        optimizer.step()
+
+    return optimizer
 
 def run_one_trial(
     problem_name: str,
@@ -70,10 +171,8 @@ def run_one_trial(
     n_init_evals: int,
     budget: Union[float, int],
     options: Optional[Dict] = None,
-    objective: Optional[MCAcquisitionObjective] = None,
-    force_restart: Optional[bool] = False,
-    impose_assump: Optional[bool] = True,
-    noisy: Optional[bool] = False,
+    force_restart: bool = False,
+    noisy: bool = False,
 ) -> None:
     """Run one trial of BO loop for the given problem and algorithm.
 
@@ -93,14 +192,10 @@ def run_one_trial(
     Returns:
         None.
     """
-    # options = {} or options
-    # Get script directory
-    if algo == 'fast_pKGFN' and impose_assump == True:
-        raise ValueError(f"fast_pKGFN currently does not support upstream-downstream dependencies. Only support when impose_assump=False.")
+    if algo not in ["Random", "NN_UQ"]:
+        raise ValueError(f"Unsupported algo for AL-only runner: {algo}")
     results_dir = f"./results/{problem_name}_{'_'.join(str(x) for x in problem.node_costs)}/{algo}/"
     os.makedirs(results_dir, exist_ok=True)
-    if objective is None:
-        objective = GenericMCObjective(lambda Y: Y[..., -1])
 
     if os.path.exists(results_dir + f"trial_{trial}.pt") and not force_restart:
         logger.info(
@@ -119,10 +214,6 @@ def run_one_trial(
         train_Y = res["train_Y"]
         best_obs_vals = res["best_obs_vals"]
         best_obs_val = best_obs_vals[-1]
-        best_post_means = res["best_post_means"]
-        best_design_post_mean = res["best_design_post_mean"]
-        obj_at_best_designs = res["obj_at_best_designs"]
-        best_post_mean = best_post_means[-1]
         runtimes = res["runtimes"]
         cumulative_costs = res["cumulative_costs"]
         node_indices = res["node_selected"]
@@ -132,64 +223,27 @@ def run_one_trial(
         node_candidates = res["node_candidates"]
         total_cost = cumulative_costs[-1]
         count = res["node_eval_counts"]
-        network_output_at_X = res[
-            "network_output_at_X"
-        ]  # comment this out for old results as we did not store this
-        if isinstance(problem, ManufacturingGPNetwork):
-            modified_prior = True
-        else:
-            modified_prior = False
-        if algo == "EI" or algo == "KG" or algo == "Random":
-            model = initialize_GP(
-                train_X=train_X,
-                train_Y=train_Y,
-                modified_prior=modified_prior,
-                noisy=noisy,
-            )
-            mll = ExactMarginalLogLikelihood(
-                model.likelihood,
-                model,
-            )
-            fit_gpytorch_model(mll)
-            posterior_mean_function = GPPosteriorMean(model=model)
-            best_design, best_post_mean = optimize_acqf(
-                acq_function=posterior_mean_function,
-                bounds=problem.bounds.to(torch.double),
-                q=1,
-                num_restarts=10 * problem.dim,
-                raw_samples=100 * problem.dim,
-                options={"batch_limit": 5},
-            )
-            train_X_network, train_Y_network = construct_obs_set(
-                X=train_X.clone(),
-                Y=network_output_at_X,
-                parent_nodes=problem.parent_nodes,
-                active_input_indices=problem.active_input_indices,
-            )
-            model_network = GaussianProcessNetwork(
-                train_X=train_X_network,
-                train_Y=train_Y_network,
-                dag=problem.dag,
-                active_input_indices=problem.active_input_indices,
-                node_groups=problem.node_groups,
-                problem=problem,
-                noisy=noisy,
-            )
-            fit_gp_network(model_network)
-        else:
-            model = GaussianProcessNetwork(
-                train_X=train_X,
-                train_Y=train_Y,
-                dag=problem.dag,
-                active_input_indices=problem.active_input_indices,
-                node_groups=problem.node_groups,
-                problem=problem,
-                noisy=noisy,
-            )
-            fit_gp_network(model)
-            best_design, best_post_mean = optimize_posterior_mean(
-                model=model, problem=problem, objective=objective
-            )
+        network_output_at_X = res["network_output_at_X"]
+        test_losses = res.get("test_losses", [])
+        best_test_loss = res.get("best_test_loss", float("inf"))
+        train_X_nn = res.get("train_X_nn", None)
+        train_y_nn = res.get("train_y_nn", None)
+        predictor = options["predictor"]
+        test_X = options["test_X"]
+        test_y = options["test_y"]
+        task = options.get("task", "regression")
+        nn_optimizer = torch.optim.Adam(
+            predictor.parameters(),
+            lr=options.get("nn_lr", 1e-3),
+            weight_decay=options.get("nn_weight_decay", 1e-6),
+        )
+        _ = load_latest_nn_checkpoint(
+            results_dir=results_dir,
+            trial=trial,
+            predictor=predictor,
+            nn_optimizer=nn_optimizer,
+            map_location="cpu",
+        )
 
     else:
         logger.info(
@@ -198,15 +252,15 @@ def run_one_trial(
             f"Algorithm: {algo}\n"
             f"Trial: {trial}"
         )
+        predictor = options["predictor"]
+        test_X = options["test_X"]
+        test_y = options["test_y"]
+        task = options.get("task", "regression")
 
         # Set manual seed
         torch.manual_seed(trial)
         np.random.seed(trial)
         random.seed(trial)
-        if isinstance(problem, ManufacturingGPNetwork):
-            modified_prior = True
-        else:
-            modified_prior = False
         # Generate initial design using SobolSampler
         X = (
             draw_sobol_samples(
@@ -223,94 +277,48 @@ def run_one_trial(
             network_output_at_X = network_output_at_X + torch.normal(
                 0, 1, size=network_output_at_X.shape
             )
+        train_X_nn = X.clone()
+        train_y_nn = network_output_at_X[..., [-1]].clone()
+
+        nn_optimizer = torch.optim.Adam(
+            predictor.parameters(),
+            lr=options.get("nn_lr", 1e-3),
+            weight_decay=options.get("nn_weight_decay", 1e-6),
+        )
+
+        nn_optimizer = train_predictor_regression(
+            predictor=predictor,
+            train_X=train_X_nn,
+            train_y=train_y_nn,
+            n_steps=options.get("nn_train_steps", 200),
+            batch_size=options.get("nn_batch_size", 64),
+            optimizer=nn_optimizer,
+        )
         train_X, train_Y = construct_obs_set(
             X=X,
             Y=network_output_at_X,
             parent_nodes=problem.parent_nodes,
             active_input_indices=problem.active_input_indices,
         )
-        if algo == "EI" or algo == "KG" or algo == "Random":
-            train_X_network = [
-                train_X[i].clone() for i in range(len(train_X))
-            ]  # for computing posterior mean metric
-            train_Y_network = [
-                train_Y[i].clone() for i in range(len(train_Y))
-            ]  # for computing posterior mean metric
-            train_X = X
-            if isinstance(problem, PharmaFunctionNetwork):
-                train_Y = objective(torch.concat(train_Y, dim=-1)).unsqueeze(-1)
-            else:
-                train_Y = train_Y[-1]
-            model = initialize_GP(
-                train_X=train_X,
-                train_Y=train_Y,
-                modified_prior=modified_prior,
-                noisy=noisy,
-            )
-            mll = ExactMarginalLogLikelihood(
-                model.likelihood,
-                model,
-            )
-            fit_gpytorch_model(mll)
-            # The following lines are for computing posterior mean metric if we consider the one with leveraging network
-            model_network = GaussianProcessNetwork(
-                train_X=train_X_network,
-                train_Y=train_Y_network,
-                dag=problem.dag,
-                active_input_indices=problem.active_input_indices,
-                node_groups=problem.node_groups,
-                problem=problem,
-                noisy=noisy,
-            )
-            fit_gp_network(model_network)
-        else:
-            model = GaussianProcessNetwork(
-                train_X=train_X,
-                train_Y=train_Y,
-                dag=problem.dag,
-                active_input_indices=problem.active_input_indices,
-                node_groups=problem.node_groups,
-                problem=problem,
-                noisy=noisy,
-            )
-            fit_gp_network(model)
-
         if "obs_val" in metrics:
-            if algo == "EI" or algo == "KG" or algo == "Random":
-                best_obs_val = train_Y.max().item()
-            else:
-                if isinstance(problem, PharmaFunctionNetwork):
-                    if algo in ["EIFN", "TSFN", "Random", "KGFN"]:
-                        best_obs_val = (
-                            objective(torch.concat(train_Y, dim=-1)).max().item()
-                        )
-                    elif algo in ["pKGFN","fast_pKGFN"]:
-                        best_obs_val = -torch.inf  # not applicable for pKGFN due to partial evaluations
-                else:
-                    best_obs_val = train_Y[-1].max().item()
+            best_obs_val = train_y_nn.max().item()
             best_obs_vals = [best_obs_val]
 
-        if "pos_mean" in metrics:
-            if algo == "EI" or algo == "KG" or algo == "Random":
-                best_design, best_post_mean = optimize_posterior_mean(
-                    model=model_network,
-                    problem=problem,
-                    objective=objective,
-                )
-            else:
-                best_design, best_post_mean = optimize_posterior_mean(
-                    model=model,
-                    problem=problem,
-                    objective=objective,
-                )
-            obj_at_best_designs = [objective(problem.evaluate(best_design)).item()]
-            best_post_means = [best_post_mean.item()]
-            best_design_post_mean = [best_design]
-            logger.info(
-                f"Initial best posterior mean for the objective: "
-                f"{best_post_mean.item():4f} at {best_design}"
-                f"(Exact obj evaluation {objective(problem.evaluate(best_design)).item():4f})"
+
+        if "test_loss" in metrics:
+            # You need these objects available in scope:
+            #   predictor: your trained NN at time t (theta_t)
+            #   test_X, test_y: your held-out test set tensors
+            #   task: "classification" or "regression"
+            test_loss = compute_test_loss(
+                predictor=predictor,
+                test_X=test_X,
+                test_y=test_y,
+                task=task,
             )
+            test_losses = [test_loss]
+            best_test_loss = test_loss
+            logger.info(f"Initial test loss: {test_loss:.6f}")
 
         runtimes = [None]
         cumulative_costs = [None]
@@ -327,93 +335,29 @@ def run_one_trial(
         remaining_budget = budget - total_cost
         logger.info(f"Remaining budget: {remaining_budget}")
         t0 = time.time()
-        if algo == "fast_pKGFN":
-            t0_fan_can = time.time()
-            gen_x_fantasies_fn = GenbatchXFantasiesFN(
-                model=model, num_samples=10, objective=objective
-            )
-            X_fantasies_batch, _ = optimize_acqf(
-                acq_function=gen_x_fantasies_fn,
-                q=10,
-                num_restarts=10 * problem.dim,
-                raw_samples=100 * problem.dim,
-                bounds=problem.bounds,
-                options={"batch_limit": 1},
-            )
-
-            if isinstance(problem, AckleyMatyasFunctionNetwork):
-                rad = 2
-            elif isinstance(problem, Freesolv3FunctionNetwork):
-                rad = 0.1
-            else:
-                rad = 0.2
-
-            X_fantasies_candidates_Lo = generate_X_fantasies_candidates_RaLo(
-                radius=rad,
-                no_random=0,
-                no_local=10,
-                problem=problem,
-                best_design=best_design,
-                include_best=True,  # always include best design to avoid negative KGFN value
-            )
-            X_fantasies_candidates = torch.cat(
-                (X_fantasies_batch, X_fantasies_candidates_Lo), dim=0
-            )
-            logger.info(
-                f"Generate X_fantansies_candidate takes {time.time()-t0_fan_can:.4f} seconds"
-            )
-            # Get suggested point
-            (
-                new_x,
-                new_node,
-                node_best_acq_vals,
-                node_candidate,
-            ) = get_suggested_node_and_input(
-                algo=algo,
-                problem=problem,
-                model=model,
-                best_obs_val=best_obs_vals[-1],
-                best_post_mean=best_post_means[-1],
-                best_design=best_design,
-                objective=objective,
-                remaining_budget=remaining_budget,
-                impose_assump=impose_assump,
-                X_fantasies_candidates=X_fantasies_candidates,
-            )
-        else:
-            (
-                new_x,
-                new_node,
-                node_best_acq_vals,
-                node_candidate,
-            ) = get_suggested_node_and_input(
-                algo=algo,
-                problem=problem,
-                model=model,
-                best_obs_val=best_obs_vals[-1],
-                best_post_mean=best_post_means[-1],
-                best_design=best_design,
-                objective=objective,
-                remaining_budget=remaining_budget,
-                impose_assump=impose_assump,
-            )
+        new_x, new_node, node_best_acq_vals, node_candidate = get_suggested_node_and_input(
+            algo=algo,
+            problem=problem,
+            predictor=predictor,
+            options=options,
+            remaining_budget=remaining_budget,
+        )
 
         t1 = time.time()
         logger.info(f"Optimizing the acquisition takes {t1 - t0:.4f} seconds")
         # The following lines separate cases for algorithms that always compute full network and ones that compute partially.
-        if algo in ["Random", "EIFN", "TSFN", "EI", "KG", "KGFN"]:
-            if total_cost + sum(problem.node_costs) > budget:
-                break
-        elif algo in ["KGFN", "pKGFN", "fast_pKGFN"]:
-            eval_cost = [problem.node_costs[k] for k in new_node]
-            eval_cost = sum(eval_cost)
-            if total_cost + eval_cost > budget:
-                break
+        if new_node is None:
+            eval_cost = sum(problem.node_costs)
+        else:
+            eval_cost = sum(problem.node_costs[k] for k in new_node)
+
+        if total_cost + eval_cost > budget:
+            break
         # Node evaluation
         new_y = problem.evaluate(X=new_x, idx=new_node)
         if noisy:
             new_y = new_y + torch.normal(0, 1, size=new_y.shape)
-        # Update training data and comparison metrics
+        # Update training data
         if new_node is None:
             if algo == "Random":
                 logger.info(
@@ -421,128 +365,73 @@ def run_one_trial(
                 )
             else:
                 logger.info(
-                    f"Evaluate the full network at input {new_x} (acqf val: {node_best_acq_vals:.4f}): {new_y}"
+                    f"Evaluate the full network at input {new_x} "
+                    f"(acqf val: {node_best_acq_vals:.4f}): {new_y}"
                 )
-            total_cost += sum(problem.node_costs)
+
+            total_cost += eval_cost
             count = count + torch.ones(len(problem.parent_nodes), dtype=int)
-            new_node = list(range(problem.n_nodes))
+
+            # full-eval データも partial 用バッファも両方更新
+            train_X_nn = torch.cat((train_X_nn, new_x), dim=0)
+            train_y_nn = torch.cat((train_y_nn, new_y[..., [-1]]), dim=0)
+
+            network_output_at_X = torch.cat((network_output_at_X, new_y), dim=0)
+
             new_obs_x, new_obs_y = construct_obs_set(
                 X=new_x,
                 Y=new_y,
                 parent_nodes=problem.parent_nodes,
                 active_input_indices=problem.active_input_indices,
             )
-            if algo == "EI" or algo == "KG" or algo == "Random":
-                train_X = torch.cat((train_X, new_x), dim=0)
-                network_output_at_X = torch.cat((network_output_at_X, new_y), dim=0)
-                if isinstance(problem, PharmaFunctionNetwork):
-                    new_train_y = objective(torch.concat(new_obs_y, dim=-1)).unsqueeze(
-                        -1
-                    )
-                else:
-                    new_train_y = new_obs_y[-1]
-                train_Y = torch.cat((train_Y, new_train_y), dim=0)
-                model = initialize_GP(
-                    train_X=train_X,
-                    train_Y=train_Y,
-                    modified_prior=modified_prior,
-                    noisy=noisy,
-                )
-                mll = ExactMarginalLogLikelihood(
-                    model.likelihood,
-                    model,
-                )
-                fit_gpytorch_model(mll)
-                train_X_network, train_Y_network = construct_obs_set(
-                    X=train_X.clone(),
-                    Y=network_output_at_X,
-                    parent_nodes=problem.parent_nodes,
-                    active_input_indices=problem.active_input_indices,
-                )
-                model_network = GaussianProcessNetwork(
-                    train_X=train_X_network,
-                    train_Y=train_Y_network,
-                    dag=problem.dag,
-                    active_input_indices=problem.active_input_indices,
-                    node_groups=problem.node_groups,
-                    problem=problem,
-                )
-                fit_gp_network(model_network)
-            else:
-                for idx in range(problem.n_nodes):
-                    train_X[idx] = torch.cat((train_X[idx], new_obs_x[idx]), dim=0)
-                    train_Y[idx] = torch.cat((train_Y[idx], new_obs_y[idx]), dim=0)
-                    # Refit a selected node GP in Network
-                    model.node_GPs[idx] = initialize_GP(
-                        train_X=train_X[idx],
-                        train_Y=train_Y[idx],
-                        modified_prior=modified_prior,
-                        noisy=noisy,
-                    )
-                    fit_gp_network(model, idx=idx)
-        else:
-            eval_cost = [problem.node_costs[k] for k in new_node]
-            eval_cost = sum(eval_cost)
-            idx_group = problem.node_groups.index(new_node)
-            total_cost += eval_cost
-            print(node_best_acq_vals[idx_group])
-            logger.info(
-                f"Evaluate at node {new_node} with input {new_x}"
-                f"(acqf val (over cost): {node_best_acq_vals[idx_group] :.4f}): {new_y}"
+            for j in range(problem.n_nodes):
+                train_X[j] = torch.cat((train_X[j], new_obs_x[j]), dim=0)
+                train_Y[j] = torch.cat((train_Y[j], new_obs_y[j]), dim=0)
+
+            nn_optimizer = train_predictor_regression(
+                predictor=predictor,
+                train_X=train_X_nn,
+                train_y=train_y_nn,
+                n_steps=options.get("nn_train_steps", 200),
+                batch_size=options.get("nn_batch_size", 64),
+                optimizer=nn_optimizer,
             )
+
+            evaluated_nodes = list(range(problem.n_nodes))
+
+        else:
+            total_cost += eval_cost
+            idx_group = problem.node_groups.index(new_node)
+            logger.info(
+                f"Evaluate at node {new_node} with input {new_x} "
+                f"(acqf val (over cost): {node_best_acq_vals[idx_group]:.4f}): {new_y}"
+            )
+
             idx_for_new_y = 0
             for j in new_node:
-                train_X[j] = torch.cat(
-                    (train_X[j], new_x), dim=0
-                )  # we assume node in the same node groups take same x
+                train_X[j] = torch.cat((train_X[j], new_x), dim=0)
                 train_Y[j] = torch.cat((train_Y[j], new_y[..., [idx_for_new_y]]), dim=0)
                 idx_for_new_y += 1
                 count[j] += 1
-                # Refit the selected node GP in the GP network model
-                model.node_GPs[j] = initialize_GP(
-                    train_X=train_X[j],
-                    train_Y=train_Y[j],
-                    modified_prior=modified_prior,
-                    noisy=noisy,
-                )
-                fit_gp_network(model, idx=j)
 
-        # Update comparison metrics
+            evaluated_nodes = new_node
+
         if "obs_val" in metrics:
-            if algo == "EI" or algo == "KG" or algo == "Random":
-                best_obs_val = train_Y.max().item()
-            else:
-                if isinstance(problem, PharmaFunctionNetwork):
-                    if algo in ["EIFN", "TSFN", "Random", "KGFN"]:
-                        temp = torch.concat(train_Y, dim=-1)
-                        best_obs_val = objective(temp).max().item()
-                    elif algo in ["pKGFN"]:
-                        best_obs_val = (
-                            -torch.inf  # not applicable for pKGFN due to partial evaluations
-                        )
-                else:
-                    best_obs_val = train_Y[-1].max().item()
+            best_obs_val = train_y_nn.max().item()
             best_obs_vals.append(best_obs_val)
             # logger.info(f"Best observed objective value: {best_obs_val:.4f}")
 
-        if "pos_mean" in metrics:
-            if algo == "EI" or algo == "KG" or algo == "Random":
-                best_design, best_post_mean = optimize_posterior_mean(
-                    model=model_network, problem=problem, objective=objective
-                )
-            else:
-                best_design, best_post_mean = optimize_posterior_mean(
-                    model=model, problem=problem, objective=objective
-                )
-            obj_at_best_design = objective(problem.evaluate(best_design))
-            obj_at_best_designs.append(obj_at_best_design.item())
-            best_post_means.append(best_post_mean.item())
-            best_design_post_mean.append(best_design)
-            logger.info(
-                f"Best posterior mean for the objective: "
-                f"{best_post_mean.item():4f} at {best_design}"
-                f"(Exact obj evaluation {obj_at_best_design.item():4f})"
+        
+        if "test_loss" in metrics:
+            test_loss = compute_test_loss(
+                predictor=predictor,
+                test_X=test_X,
+                test_y=test_y,
+                task=task,
             )
+            test_losses.append(test_loss)
+            best_test_loss = min(best_test_loss, test_loss)
+            logger.info(f"Test loss: {test_loss:.6f} (best {best_test_loss:.6f})")
 
         logger.info(f"total cost used: {total_cost}")
         logger.info(
@@ -555,11 +444,25 @@ def run_one_trial(
         # Store data
         runtimes.append(t1 - t0)
         cumulative_costs.append(total_cost)
-        node_indices.append(new_node)
+        # node_indices.append(new_node)
+        node_indices.append(evaluated_nodes)
         node_inputs.append(new_x)
         node_evals.append(new_y)
         acqf_vals.append(node_best_acq_vals)
         node_candidates.append(node_candidate)
+
+        step = len(cumulative_costs) - 1  # because first entry is None
+        save_nn_checkpoint(
+            results_dir=results_dir,
+            trial=trial,
+            step=step,
+            predictor=predictor,
+            nn_optimizer=nn_optimizer,  # later: pass your optimizer here
+            extra={
+                "total_cost": float(total_cost),
+                "budget": float(budget),
+            },
+        )
 
         BO_results = {
             "bo_budget": budget,
@@ -569,9 +472,9 @@ def run_one_trial(
             "node_input_selected": node_inputs,
             "node_eval_val": node_evals,
             "acqf_val_list": acqf_vals,
-            "best_post_means": best_post_means,
-            "best_design_post_mean": best_design_post_mean,
-            "obj_at_best_designs": obj_at_best_designs,
+            # "best_post_means": best_post_means,
+            # "best_design_post_mean": best_design_post_mean,
+            # "obj_at_best_designs": obj_at_best_designs,
             "best_obs_vals": best_obs_vals,
             "node_eval_counts": count,
             "node_candidates": node_candidates,
@@ -583,41 +486,61 @@ def run_one_trial(
                 "numpy": np.random.get_state(),
                 "random": random.getstate(),
             },
+            "test_losses": test_losses if "test_loss" in metrics else None,
+            "best_test_loss": best_test_loss if "test_loss" in metrics else None,
+            "train_X_nn": train_X_nn if algo == "NN_UQ" else None,
+            "train_y_nn": train_y_nn if algo == "NN_UQ" else None,
         }
-        BO_model = {"model": model}
-        torch.save(BO_results, results_dir + f"trial_{trial}.pt")
-        torch.save(BO_model, results_dir + f"model_trial_{trial}.pt")  # dill
+
+
+import torch
+import torch.nn as nn
+
+def _enable_mc_dropout(m: nn.Module) -> None:
+    # dropout だけ train() に戻す（BatchNorm 等は eval のまま）
+    if isinstance(m, nn.Dropout) or isinstance(m, nn.Dropout2d) or isinstance(m, nn.Dropout3d):
+        m.train()
+
+@torch.no_grad()
+def mc_predict_mean_var(predictor: nn.Module, X: torch.Tensor, mc_samples: int = 30):
+    """
+    X: [N, d]  (or [batch, q, d] -> flatten yourself)
+    returns: mean [N, 1], var [N, 1]
+    """
+    predictor.eval()
+    predictor.apply(_enable_mc_dropout)  # test-time dropout :contentReference[oaicite:1]{index=1}
+
+    outs = []
+    for _ in range(mc_samples):
+        outs.append(predictor(X))  # regression scalar [N,1]
+    Y = torch.stack(outs, dim=0)   # [S, N, 1]
+    mean = Y.mean(dim=0)
+    var = Y.var(dim=0, unbiased=False)
+    return mean, var
+
+from botorch.utils.sampling import draw_sobol_samples
+
+def make_candidates(problem, n_sobol=256):
+    bounds = problem.bounds.to(dtype=torch.get_default_dtype())
+    Xs = draw_sobol_samples(bounds=bounds, n=n_sobol, q=1).squeeze(-2)
+    return Xs
 
 
 def get_suggested_node_and_input(
     algo: str,
     remaining_budget: float,
     problem: SyntheticTestFunction,
-    model: Model,
-    best_obs_val: Optional[float] = None,
-    best_post_mean: Optional[float] = None,
-    best_design: Optional[Tensor] = None,
-    objective: Optional[MCAcquisitionObjective] = None,
-    impose_assump: Optional[bool] = True,
-    X_fantasies_candidates: Optional[Tensor] = None,
-) -> Tuple[
-    Tensor, Optional[int], Optional[Union[List[Tensor], Tensor]], Optional[List[Tensor]]
-]:
-    """Optimize an acquisition function and return suggested node(s) and input to be evaluated
-
-    Args:
-        algo (str): A string representing the name of the algorithm.
-        problem (SyntheticTestFunction): A function network test problem.
-        model (Model): A GaussianProcessNetwork class model
-        best_obs_val (Optional[Tensor], optional): A value of current best final node output found so far. Defaults to Float.
+    predictor: nn.Module,
+    options: Optional[Dict] = None,
+) -> Tuple[Tensor, Optional[List[int]], Optional[float], Optional[object]]:
+    """Return the next input and optionally a node-group to evaluate.
 
     Returns:
-        Tuple[Tensor, Optional[int], Optional[Union[List[Tensor], Tensor]], Optional[List[Tensor]]]:
-        A four-element tuple containing:
-            - A tensor of suggested input to be evaluated;
-            - A suggested node index to be evaluated;
-            - A list of acquisition function values for the optimal candidate at each node;
-            - A list of tensors of the optimal candidate for each node (for KGFN only, otherwise return None).
+        A tuple of:
+            - new_x: input to evaluate
+            - new_node: node-group to evaluate; None means full-network evaluation
+            - acq_val: utility score of the selected action
+            - node_candidate: optional extra record for debugging/logging
     """
     if algo == "Random":
         new_x = (
@@ -625,471 +548,27 @@ def get_suggested_node_and_input(
             + problem.bounds[0]
         )
         return new_x, None, None, None
+    elif algo == "NN_UQ":
+        mc_samples = (options or {}).get("mc_samples", 30)
+        n_sobol = (options or {}).get("cand_n_sobol", 256)
 
-    elif algo == "EI":
-        acquisition_function = ExpectedImprovement(model=model, best_f=best_obs_val)
-        new_x, acqf_val = optimize_acqf(
-            acq_function=acquisition_function,
-            bounds=problem.bounds.to(torch.double),
-            q=1,
-            num_restarts=20,
-            raw_samples=100,
-            options={},
-        )
-        return new_x, None, acqf_val, None
+        Xcand = make_candidates(problem, n_sobol=n_sobol)
+        _, v = mc_predict_mean_var(predictor, Xcand, mc_samples=mc_samples)
 
-    elif algo == "KG":
-        acquisition_function = vanillaKG(
-            model=model, num_fantasies=8, current_value=best_post_mean
-        )
-        new_x, acqf_val = botorch_optimize_acqf(
-            acq_function=acquisition_function,
-            bounds=problem.bounds.to(torch.double),
-            q=1,
-            num_restarts=20,
-            raw_samples=100,
-            options={},
-        )
-        return new_x, None, acqf_val, None
-
-    elif algo == "KGFN":
-        if isinstance(problem, AckleyFunctionNetwork):
-            rad = 0.4
-        elif isinstance(problem, Freesolv3FunctionNetwork):
-            rad = 0.1
-        elif isinstance(problem, AckleyMatyasFunctionNetwork):
-            rad = 2
-        else:
-            rad = 0.2
-        logger.info(f"Generating initial points for Full-KGFN with radius: {rad}.")
-        X_fantasies_candidates_Lo = generate_X_fantasies_candidates_RaLo(
-            radius=rad,
-            no_random=0,
-            no_local=10,
-            problem=problem,
-            best_design=best_design,
-            include_best=True,
-        )
-        X_fantasies_candidates_TS = generate_X_fantasies_candidates_TS(
-            no_points=10,
-            model=model,
-            problem=problem,
-            objective=objective,
-        )
-        X_fantasies_candidates = torch.cat(
-            (X_fantasies_candidates_TS, X_fantasies_candidates_Lo), dim=0
-        )
-        acquisition_function = FullKnowledgeGradientFN(
-            d=problem.dim,
-            model=model,
-            problem_bounds=problem.bounds.to(torch.double),
-            X_fantasies_candidates=X_fantasies_candidates,
-            num_fantasies=8,
-            inner_sampler=SobolQMCNormalSampler(sample_shape=torch.Size([128])),
-            current_value=best_post_mean,
-        )
-        new_x, acqf_val = botorch_optimize_acqf(
-            acq_function=acquisition_function,
-            bounds=problem.bounds.to(torch.double),
-            q=1,
-            num_restarts=10 * problem.dim,
-            raw_samples=100 * problem.dim,
-            options={"batch_limit": 1},
-        )
-        return new_x, None, acqf_val, None
-
-    elif algo == "pKGFN":
-        logger.info(f"Imposing upstream-downstream restriction: {impose_assump}")
-        node_candidate = []
-        node_best_acq_vals = []
-        if isinstance(problem, AckleyFunctionNetwork):
-            rad = 0.4
-        elif isinstance(problem, Freesolv3FunctionNetwork):
-            rad = 0.1
-        elif isinstance(problem, AckleyMatyasFunctionNetwork):
-            rad = 2
-        else:
-            rad = 0.2
-        logger.info(
-            f"Generating initial points for par-KGFN (Disc) with radius: {rad}."
-        )
-        X_fantasies_candidates_Lo = generate_X_fantasies_candidates_RaLo(
-            radius=rad,
-            no_random=0,
-            no_local=10,
-            problem=problem,
-            best_design=best_design,
-            include_best=True,
-        )
-        X_fantasies_candidates_TS = generate_X_fantasies_candidates_TS(
-            no_points=10,
-            model=model,
-            problem=problem,
-            objective=objective,
-        )
-        X_fantasies_candidates = torch.cat(
-            (X_fantasies_candidates_TS, X_fantasies_candidates_Lo), dim=0
-        )
-        for j in model.node_groups:
-            eval_cost = [problem.node_costs[k] for k in j]
-            eval_cost = sum(eval_cost)
-            logger.info(f"Starting DKGFN optimization at node {j}")
-            if remaining_budget < eval_cost:
-                acqf_val = -torch.inf
-                node_candidate.append([])
-            else:
-                t0 = time.time()
-                X_evaluation_mask = torch.zeros(problem.n_nodes, dtype=int)
-                X_evaluation_mask[j] = 1
-                acq_function = PartialKnowledgeGradientFN(
-                    model=model,
-                    d=problem.dim,
-                    q=1,
-                    node_dim=problem.node_dims[j[0]],
-                    num_fantasies=8,
-                    X_fantasies_candidates=X_fantasies_candidates,
-                    problem_bounds=problem.bounds,
-                    objective=objective,
-                    X_evaluation_mask=X_evaluation_mask,
-                    inner_sampler=SobolQMCNormalSampler(torch.Size([64])),
-                    current_value=best_post_mean,
-                )
-                candidate, acqf_val = optimize_discrete_acqf_for_function_network(
-                    acq_function=acq_function,
-                    bounds=problem.bounds.to(**tkwargs),
-                    parent_bounds=problem.parent_bounds,
-                    num_restarts=problem.dim * 10,
-                    raw_samples=problem.dim * 100,
-                    impose_assump=impose_assump,
-                )
-                del acq_function
-                gc.collect()
-                logger.info(
-                    f"Best candidate {candidate} for node {j} with acqf_val (before divided by cost) {acqf_val:.4f}"
-                )
-                logger.info(
-                    f"pKGFN optimization at node {j} took {time.time()-t0:.4f} seconds"
-                )
-                node_candidate.append(candidate)
-            node_best_acq_vals.append(acqf_val / eval_cost)
-        new_node_idx = np.argmax(node_best_acq_vals)
-        new_x = node_candidate[new_node_idx]
-        new_node = model.node_groups[new_node_idx]
-        return new_x, new_node, node_best_acq_vals, node_candidate
-
-    elif algo == "EIFN":
-        qmc_sampler = SobolQMCNormalSampler(sample_shape=torch.Size([128]))
-        acq_function = qExpectedImprovement(
-            model=model,
-            best_f=best_obs_val,
-            sampler=qmc_sampler,
-            objective=objective,
-        )
-        posterior_mean_function = PosteriorMean(
-            model=model,
-            sampler=qmc_sampler,
-            objective=objective,
-        )
-        new_x, acqf_val = optimize_acqf_and_get_suggested_point(
-            acq_func=acq_function,
-            bounds=problem.bounds,
-            batch_size=1,
-            posterior_mean=posterior_mean_function,
-        )
-        return new_x, None, acqf_val, None
-
-    elif algo == "fast_pKGFN":
-        if impose_assump:
-            raise ValueError(f"Imposing upstream-downstream restriction: {impose_assump} - This should be FALSE!")
-        # Getting candidate point from EIFN
-        t0 = time.time()
-        t0_EIFN = time.time()
-        qmc_sampler = SobolQMCNormalSampler(sample_shape=torch.Size([128]))
-        acq_function = qExpectedImprovement(
-            model=model,
-            best_f=best_post_mean,
-            sampler=qmc_sampler,
-            objective=objective,
-        )
-        posterior_mean_function = PosteriorMean(
-            model=model,
-            sampler=qmc_sampler,
-            objective=objective,
-        )
-        new_x, _ = optimize_acqf_and_get_suggested_point(
-            acq_func=acq_function,
-            bounds=problem.bounds,
-            batch_size=1,
-            posterior_mean=posterior_mean_function,
-        )
-        logger.info(
-            f"Optimization EIFN to get a network candidate took {time.time()-t0_EIFN:.4f} seconds"
-        )
-        logger.info(f"EIFN candidate {new_x}")
-        node_best_acq_vals = []
-        node_candidate = []
-        inner_sampler = SobolQMCNormalSampler(torch.Size([64]))
-        # Generate one realization
-        network_realization = FN_realization(model=model, objective=objective)
-        outcomes = network_realization(new_x)
-        for j in model.node_groups:
-            eval_cost = [problem.node_costs[k] for k in j]
-            eval_cost = sum(eval_cost)
-            logger.info(f"Starting fast_pKGFN optimization at node {j}")
-            t0_pKGFN_com = time.time()
-            if remaining_budget < eval_cost:
-                acqf_val = -torch.inf
-                node_candidate.append([])
-                node_best_acq_vals.append(acqf_val)
-            # Define p-KGFN function
-            else:
-                X_evaluation_mask = torch.zeros(problem.n_nodes, dtype=int)
-                X_evaluation_mask[j] = 1
-                acq_function = PartialKnowledgeGradientFN(
-                    model=model,
-                    d=problem.dim,
-                    q=1,
-                    node_dim=problem.node_dims[j[0]],
-                    num_fantasies=8,
-                    X_fantasies_candidates=X_fantasies_candidates,
-                    problem_bounds=problem.bounds,
-                    objective=objective,
-                    X_evaluation_mask=X_evaluation_mask,
-                    inner_sampler=inner_sampler,
-                    current_value=best_post_mean,
-                )
-                # check if it is a root node:
-                if len(problem.parent_nodes[j[0]]) == 0:
-                    candidate = new_x[..., problem.active_input_indices[j[0]]].to(
-                        torch.double
-                    )
-                else:
-                    if len(problem.active_input_indices[j[0]]) == 0:
-                        candidate = outcomes[..., problem.parent_nodes[j[0]]]
-                    else:
-                        candidate = torch.cat(
-                            (
-                                new_x[..., problem.active_input_indices[j[0]]],
-                                outcomes[..., problem.parent_nodes[j[0]]],
-                            ),
-                            dim=-1,
-                        )
-                node_candidate.append(candidate)
-                logger.info(f"Node {j}'s candidate: {candidate}")
-                pkgfn_value = acq_function(candidate) / eval_cost
-                node_best_acq_vals.append(pkgfn_value.item())
-            logger.info(
-                f"fast_pKGFN optimization at node {j} took {time.time()-t0_pKGFN_com} secs"
-            )
-        new_node_idx = np.argmax(node_best_acq_vals)
-        new_x_final = node_candidate[new_node_idx]
-        new_node = model.node_groups[new_node_idx]
-        return new_x_final, new_node, node_best_acq_vals, node_candidate
-
-    elif algo == "TSFN":
-        acq_function = ThompsonSamplingFN(model=model, objective=objective)
-        new_x, acqf_val = optimize_acqf(
-            acq_function=acq_function,
-            bounds=problem.bounds,
-            q=1,
-            num_restarts=10 * problem.dim,
-            raw_samples=100 * problem.dim,
-            options={"batch_limit": 1},
-        )
-        return new_x, None, acqf_val, None
+        idx = torch.argmax(v.view(-1))
+        new_x = Xcand[idx:idx+1]
+        return new_x, None, v[idx].item(), None
 
 
-def optimize_posterior_mean(
-    model: Model,
-    problem: SyntheticTestFunction,
-    objective: Optional[GenericMCObjective] = None,
-):
-    """Optimize the posterior mean of the model.
-
-    Args:
-        model: A Gaussian process network model.
-        problem: A synthetic test function problem instance.
-
-    Returns:
-        A two-element tuple containing
-        - The design that achieves the best posterior mean for the objective.
-        - The best posterior mean for the objective
-    """
-    qSR = qSimpleRegret(
-        model=model,
-        sampler=SobolQMCNormalSampler(sample_shape=torch.Size([512])),
-        objective=objective,
-    )
-    best_design, best_post_mean = optimize_acqf(
-        acq_function=qSR,
-        bounds=problem.bounds,
-        q=1,
-        num_restarts=20,
-        raw_samples=1024,
-        return_best_only=True,
-    )
-    return best_design, best_post_mean
-
-
-def generate_X_fantasies_candidates_RaLo(
-    radius: float,
-    no_random: int,
-    no_local: int,
-    problem: SyntheticTestFunction,
-    best_design: Tensor,
-    include_best: bool = True,
-):
-    if no_random == 0 and no_local == 0:
-        X_fantasies_candidates = best_design
-        return X_fantasies_candidates
-    if no_random != 0:
-        X_fantasies_candidates_random = draw_sobol_samples(
-            bounds=problem.bounds.to(**tkwargs),
-            n=no_random,
-            q=1,
-        ).squeeze(-2)
-    if no_local != 0:
-        mdist = MultivariateNormal(
-            loc=torch.zeros(problem.dim), covariance_matrix=torch.eye(problem.dim)
-        )
-        random_directions = mdist.sample([no_local])
-        random_directions = torch.transpose(
-            torch.transpose(random_directions, 0, 1) / random_directions.norm(dim=1),
-            0,
-            1,
-        )
-        random_radii = torch.rand([no_local]) ** (1 / problem.dim)
-        random_radii = random_radii.unsqueeze(dim=1)
-        X_fantasies_candidates_local = (
-            radius * (random_directions * random_radii) + best_design
-        )
-
-        if no_random != 0:
-            X_fantasies_candidates = torch.cat(
-                (X_fantasies_candidates_random, X_fantasies_candidates_local),
-                dim=0,
-            )
-        else:
-            X_fantasies_candidates = X_fantasies_candidates_local
-    else:
-        X_fantasies_candidates = X_fantasies_candidates_random
-    if include_best:
-        X_fantasies_candidates = torch.cat((X_fantasies_candidates, best_design), dim=0)
-    for i in range(problem.dim):
-        X_fantasies_candidates[..., i][
-            X_fantasies_candidates[..., i] < problem.bounds[0, i]
-        ] = problem.bounds[0, i].item()
-        X_fantasies_candidates[..., i][
-            X_fantasies_candidates[..., i] > problem.bounds[1, i]
-        ] = problem.bounds[1, i].item()
-    return X_fantasies_candidates
-
-
-def generate_X_fantasies_candidates_TS(
-    no_points: int,
-    model: Model,
-    problem: SyntheticTestFunction,
-    objective: Optional[MCAcquisitionObjective] = None,
-):
-    X_fantasies_candidates = torch.Tensor([])
-    for i in range(no_points):
-        acq_function = ThompsonSamplingFN(model=model, objective=objective)
-        new_x, _ = optimize_acqf(
-            acq_function=acq_function,
-            bounds=problem.bounds,
-            q=1,
-            num_restarts=10 * problem.dim,
-            raw_samples=100 * problem.dim,
-            options={"batch_limit": 1},
-        )
-        X_fantasies_candidates = torch.cat((X_fantasies_candidates, new_x), dim=0)
-    return X_fantasies_candidates
-
-
-def generate_X_fantasies_candidates_Greedy(
-    no_total_TS: int,
-    no_points: int,
-    model: Model,
-    problem: SyntheticTestFunction,
-    objective: Optional[MCAcquisitionObjective] = None,
-):
-    X_fantasies_candidates_TS = torch.Tensor([])
-    values = []
-    sample_f = []
-    for i in range(no_total_TS):
-        acq_function = ThompsonSamplingFN(model=model, objective=objective)
-        sample_f.append(acq_function)  # @TODO check if this works?
-        new_x, val = optimize_acqf(
-            acq_function=acq_function,
-            bounds=problem.bounds,
-            q=1,
-            num_restarts=10 * problem.dim,
-            raw_samples=100 * problem.dim,
-            options={"batch_limit": 1},
-        )
-        X_fantasies_candidates_TS = torch.cat((X_fantasies_candidates_TS, new_x), dim=0)
-        values.append(val)
-    X_fantasies_candidates = torch.Tensor([])
-    constant = np.mean(values)
-    while X_fantasies_candidates.shape[0] < no_points:
-        if X_fantasies_candidates.shape[0] == 0:
-            val_candidate = [
-                np.mean([func(X_fantasies_candidates_TS[i]) for func in sample_f])
-                for i in range(no_total_TS)
-            ]
-            idx = np.argmax(val_candidate)
-            X_fantasies_candidates = torch.cat(
-                (X_fantasies_candidates, X_fantasies_candidates_TS[[idx], ...]), dim=0
-            )
-            X_fantasies_candidates_TS = torch.cat(
-                (
-                    X_fantasies_candidates_TS[:idx, ...],
-                    X_fantasies_candidates_TS[idx + 1 :, ...],
-                ),
-                dim=0,
-            )
-        else:
-            val_candidate = [
-                np.mean(
-                    [
-                        torch.max(
-                            func(
-                                torch.cat(
-                                    (
-                                        X_fantasies_candidates,
-                                        X_fantasies_candidates_TS[i],
-                                    ),
-                                    dim=0,
-                                )
-                            )
-                        )
-                        for func in sample_f
-                    ]
-                )
-                for i in range(X_fantasies_candidates_TS.shape[0])
-            ]
-            val_candidate = [constant - value for value in val_candidate]
-            idx = np.argmax(val_candidate)
-            X_fantasies_candidates = torch.cat(
-                (X_fantasies_candidates, X_fantasies_candidates_TS[[idx], ...]), dim=0
-            )
-            X_fantasies_candidates_TS = torch.cat(
-                (
-                    X_fantasies_candidates_TS[:idx, ...],
-                    X_fantasies_candidates_TS[idx + 1 :, ...],
-                ),
-                dim=0,
-            )
-    return X_fantasies_candidates
 
 
 def parse():
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Run one replication of a BO experiment."
+        description="Run one replication of an AL experiment."
     )
     parser.add_argument("--trial", "-t", type=int, default=0)
-    parser.add_argument("--algo", "-a", type=str, default="KGFN")
+    parser.add_argument("--algo", "-a", type=str, default="NN_UQ",
+                        choices=["Random", "NN_UQ"])
     parser.add_argument("--costs", "-c", type=str, required=True)
     parser.add_argument("--budget", "-b", type=int, default=200)
     return parser.parse_args()
