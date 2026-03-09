@@ -6,6 +6,12 @@ import torch
 import torch.nn.functional as F
 
 
+def _predict_sink(predictor: torch.nn.Module, X: torch.Tensor) -> torch.Tensor:
+    if hasattr(predictor, "forward_sink"):
+        return predictor.forward_sink(X)
+    return predictor(X)
+
+
 def train_predictor_regression(
     predictor: torch.nn.Module,
     train_X: torch.Tensor,
@@ -16,30 +22,6 @@ def train_predictor_regression(
     weight_decay: float = 1e-6,
     optimizer: Optional[torch.optim.Optimizer] = None,
 ):
-    """
-    Train a sink-only regression predictor on supervised data (X, y_sink).
-
-    Args:
-        predictor:
-            NN model mapping X -> y_hat, shape [N, 1]
-        train_X:
-            input tensor of shape [N, d]
-        train_y:
-            target tensor of shape [N, 1]
-        n_steps:
-            number of SGD/Adam update steps
-        batch_size:
-            minibatch size
-        lr:
-            learning rate (used only if optimizer is None)
-        weight_decay:
-            weight decay (used only if optimizer is None)
-        optimizer:
-            optional pre-created optimizer to continue training
-
-    Returns:
-        optimizer after training
-    """
     predictor.train()
 
     if optimizer is None:
@@ -59,7 +41,7 @@ def train_predictor_regression(
         yb = train_y[idx]
 
         optimizer.zero_grad()
-        pred = predictor(xb)
+        pred = _predict_sink(predictor, xb)
         loss = F.mse_loss(pred.view_as(yb), yb)
         loss.backward()
         optimizer.step()

@@ -9,11 +9,12 @@ import warnings
 
 import torch
 
-from partial_alfn.models.mc_dropout_mlp import MCDropoutMLP
+from partial_alfn.models.multihead_mc_dropout_mlp import MultiHeadMCDropoutMLP
 from partial_alfn.runners.al_runner import run_one_trial
 from partial_alfn.runners.cli import parse
 from partial_alfn.data.testset import make_test_set
 from partial_alfn.test_functions.freesolv3 import Freesolv3FunctionNetwork
+from partial_alfn.configs.al_defaults import get_default_al_options
 
 warnings.filterwarnings("ignore")
 torch.set_default_dtype(torch.float64)
@@ -48,10 +49,12 @@ def main(
 
     metrics = ["obs_val", "test_loss"]
 
-    predictor = MCDropoutMLP(
+    predictor = MultiHeadMCDropoutMLP(
         in_dim=problem.dim,
+        n_nodes=problem.n_nodes,
         hidden=256,
         p_drop=0.1,
+        sink_idx=problem.n_nodes - 1,
     ).to(torch.get_default_dtype())
 
     test_X, test_y = make_test_set(
@@ -60,24 +63,17 @@ def main(
         seed=trial + 12345,
     )
 
-    options = {
+    options = get_default_al_options(problem)
+    options.update({
         "predictor": predictor,
         "test_X": test_X,
         "test_y": test_y,
         "task": "regression",
-        "nn_lr": 1e-3,
-        "nn_weight_decay": 1e-6,
-        "nn_train_steps": 200,
-        "nn_batch_size": 64,
-        "mc_samples": 30,
-        "cand_n_sobol": 256,
-        # Future partial-observation options:
-        # "upstream_groups": [[0]],
-        # "downstream_groups": [[1]],
-        # "uncertainty_threshold_tau": 0.05,
-        # "aux_loss_weight": 1.0,
-        # "sink_loss_weight": 1.0,
-    }
+
+        # Freesolv3-specific override if needed
+        "upstream_group_indices": [0],
+        "downstream_group_indices": [1],
+    })
 
     run_one_trial(
         problem_name=problem_name,

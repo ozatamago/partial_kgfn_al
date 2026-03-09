@@ -4,32 +4,21 @@ import torch
 import torch.nn.functional as F
 
 
+def _predict_for_eval(predictor, X: torch.Tensor) -> torch.Tensor:
+    if hasattr(predictor, "forward_sink"):
+        return predictor.forward_sink(X)
+    return predictor(X)
+
+
 def compute_test_loss(
     predictor,
     test_X: torch.Tensor,
     test_y: torch.Tensor,
     task: str = "regression",
 ) -> float:
-    """
-    Compute average test loss for the current predictor.
-
-    Args:
-        predictor:
-            NN model mapping x -> logits (classification) or y_hat (regression)
-        test_X:
-            shape [n_te, d]
-        test_y:
-            shape [n_te] for classification labels,
-            or [n_te, 1] for regression
-        task:
-            "classification" or "regression"
-
-    Returns:
-        Scalar float test loss.
-    """
     predictor.eval()
     with torch.no_grad():
-        out = predictor(test_X)
+        out = _predict_for_eval(predictor, test_X)
 
         if task == "classification":
             loss = F.cross_entropy(out, test_y.long())

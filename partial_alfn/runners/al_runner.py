@@ -3,32 +3,43 @@
 r"""
 Run one trial of active learning on a function network.
 
-Stage-1 refactor:
-- keep current NN_UQ behavior (sink-only predictor, full-network querying for NN_UQ)
-- separate orchestration from experiment-specific wiring
-- leave clear hooks for future partial-observation support
+Current version:
+- supports sink-only fallback and partial-query mode
+- supports multi-head predictor + partial buffers + partial training
+- keeps all experiment state in a single mutable state dict
+- distinguishes:
+    * base_x : external input in the original input space
+    * eval_x : actual node-specific input passed to problem.evaluate(...)
 """
 
 import os
 import random
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
 from botorch.logging import logger
 from botorch.test_functions import SyntheticTestFunction
 from botorch.utils.sampling import draw_sobol_samples
-from torch import Tensor
 
+from partial_alfn.data.partial_buffers import (
+    append_full_network_as_partial,
+    init_partial_buffers,
+)
+from partial_alfn.data.update_buffers import (
+    append_full_observation,
+    append_partial_observation,
+)
 from partial_alfn.metrics.evaluation import compute_test_loss
 from partial_alfn.persistence.checkpoint import (
     load_latest_nn_checkpoint,
     save_nn_checkpoint,
 )
 from partial_alfn.policies.select_next_query import get_suggested_node_and_input
-from partial_alfn.training.train_sink import train_predictor_regression
+from partial_alfn.training.train_partial import train_predictor_partial
 from partial_alfn.utils.construct_obs_set import construct_obs_set
+from partial_alfn.utils.effective_costs import effective_group_cost
 
 tkwargs = {
     "dtype": torch.double,
@@ -45,8 +56,6 @@ def _make_results_dir(problem_name: str, problem: SyntheticTestFunction, algo: s
 def _initialize_new_experiment(
     *,
     problem: SyntheticTestFunction,
-    problem_name: str,
-    algo: str,
     trial: int,
     n_init_evals: int,
     metrics: List[str],
@@ -78,26 +87,11 @@ def _initialize_new_experiment(
             0, 1, size=network_output_at_X.shape
         )
 
-    # sink supervision buffer (current stage-1 implementation)
+    # Sink supervision buffer
     train_X_nn = X.clone()
     train_y_nn = network_output_at_X[..., [-1]].clone()
 
-    nn_optimizer = torch.optim.Adam(
-        predictor.parameters(),
-        lr=options.get("nn_lr", 1e-3),
-        weight_decay=options.get("nn_weight_decay", 1e-6),
-    )
-
-    nn_optimizer = train_predictor_regression(
-        predictor=predictor,
-        train_X=train_X_nn,
-        train_y=train_y_nn,
-        n_steps=options.get("nn_train_steps", 200),
-        batch_size=options.get("nn_batch_size", 64),
-        optimizer=nn_optimizer,
-    )
-
-    # node-wise observation sets from full initial design
+    # Original node-wise observation sets
     train_X, train_Y = construct_obs_set(
         X=X,
         Y=network_output_at_X,
@@ -105,9 +99,41 @@ def _initialize_new_experiment(
         active_input_indices=problem.active_input_indices,
     )
 
+    # Node-wise partial supervision buffers for multi-head training
+    partial_buffers = init_partial_buffers(
+        n_nodes=problem.n_nodes,
+        x_dim=problem.dim,
+        dtype=X.dtype,
+        device=X.device,
+    )
+    append_full_network_as_partial(
+        buffers=partial_buffers,
+        x=X,
+        y_full=network_output_at_X,
+    )
+
+    nn_optimizer = torch.optim.Adam(
+        predictor.parameters(),
+        lr=options.get("nn_lr", 1e-3),
+        weight_decay=options.get("nn_weight_decay", 1e-6),
+    )
+
+    nn_optimizer = train_predictor_partial(
+        predictor=predictor,
+        partial_buffers=partial_buffers,
+        train_X_sink=train_X_nn,
+        train_y_sink=train_y_nn,
+        sink_idx=problem.n_nodes - 1,
+        n_steps=options.get("nn_train_steps", 200),
+        batch_size=options.get("nn_batch_size", 64),
+        aux_nodes_per_step=options.get("aux_nodes_per_step", None),
+        aux_loss_weight=options.get("aux_loss_weight", 1.0),
+        sink_loss_weight=options.get("sink_loss_weight", 1.0),
+        optimizer=nn_optimizer,
+    )
+
     if "obs_val" in metrics:
-        best_obs_val = train_y_nn.max().item()
-        best_obs_vals = [best_obs_val]
+        best_obs_vals = [float(train_y_nn.max().item())]
     else:
         best_obs_vals = []
 
@@ -125,28 +151,28 @@ def _initialize_new_experiment(
         test_losses = []
         best_test_loss = float("inf")
 
-    state = {
+    return {
         "train_X": train_X,
         "train_Y": train_Y,
         "train_X_nn": train_X_nn,
         "train_y_nn": train_y_nn,
+        "partial_buffers": partial_buffers,
         "network_output_at_X": network_output_at_X,
         "best_obs_vals": best_obs_vals,
         "test_losses": test_losses,
         "best_test_loss": best_test_loss,
         "runtimes": [None],
-        "cumulative_costs": [None],
+        "cumulative_costs": [0.0],
         "node_selected": [None],
-        "node_input_selected": [None],
+        "node_input_selected": [None],     # store base_x
         "node_eval_val": [None],
         "acqf_val_list": [None],
         "node_candidates": [None],
-        "node_eval_counts": torch.zeros(len(problem.parent_nodes), dtype=int),
+        "node_eval_counts": torch.zeros(problem.n_nodes, dtype=torch.long),
         "total_cost": 0.0,
         "predictor": predictor,
         "nn_optimizer": nn_optimizer,
     }
-    return state
 
 
 def _resume_experiment(
@@ -176,75 +202,31 @@ def _resume_experiment(
         map_location="cpu",
     )
 
-    state = {
+    cumulative_costs = res["cumulative_costs"]
+    total_cost = float(cumulative_costs[-1]) if len(cumulative_costs) > 0 else 0.0
+
+    return {
         "train_X": res["train_X"],
         "train_Y": res["train_Y"],
         "train_X_nn": res.get("train_X_nn", None),
         "train_y_nn": res.get("train_y_nn", None),
+        "partial_buffers": res.get("partial_buffers", None),
         "network_output_at_X": res["network_output_at_X"],
         "best_obs_vals": res.get("best_obs_vals", []),
         "test_losses": res.get("test_losses", []),
         "best_test_loss": res.get("best_test_loss", float("inf")),
         "runtimes": res["runtimes"],
-        "cumulative_costs": res["cumulative_costs"],
+        "cumulative_costs": cumulative_costs,
         "node_selected": res["node_selected"],
         "node_input_selected": res["node_input_selected"],
         "node_eval_val": res["node_eval_val"],
         "acqf_val_list": res["acqf_val_list"],
         "node_candidates": res["node_candidates"],
         "node_eval_counts": res["node_eval_counts"],
-        "total_cost": res["cumulative_costs"][-1],
+        "total_cost": total_cost,
         "predictor": predictor,
         "nn_optimizer": nn_optimizer,
     }
-    return state
-
-
-def _append_full_observation(
-    *,
-    problem: SyntheticTestFunction,
-    new_x: Tensor,
-    new_y: Tensor,
-    state: Dict,
-) -> List[int]:
-    state["train_X_nn"] = torch.cat((state["train_X_nn"], new_x), dim=0)
-    state["train_y_nn"] = torch.cat((state["train_y_nn"], new_y[..., [-1]]), dim=0)
-    state["network_output_at_X"] = torch.cat((state["network_output_at_X"], new_y), dim=0)
-
-    new_obs_x, new_obs_y = construct_obs_set(
-        X=new_x,
-        Y=new_y,
-        parent_nodes=problem.parent_nodes,
-        active_input_indices=problem.active_input_indices,
-    )
-    for j in range(problem.n_nodes):
-        state["train_X"][j] = torch.cat((state["train_X"][j], new_obs_x[j]), dim=0)
-        state["train_Y"][j] = torch.cat((state["train_Y"][j], new_obs_y[j]), dim=0)
-
-    state["node_eval_counts"] = state["node_eval_counts"] + torch.ones(
-        len(problem.parent_nodes), dtype=int
-    )
-    return list(range(problem.n_nodes))
-
-
-def _append_partial_observation(
-    *,
-    problem: SyntheticTestFunction,
-    new_x: Tensor,
-    new_y: Tensor,
-    new_node: List[int],
-    state: Dict,
-) -> List[int]:
-    # Stage-1 behavior:
-    # update node-wise observation buffers only.
-    # Future partial-observation learning should also update partial NN buffers here.
-    idx_for_new_y = 0
-    for j in new_node:
-        state["train_X"][j] = torch.cat((state["train_X"][j], new_x), dim=0)
-        state["train_Y"][j] = torch.cat((state["train_Y"][j], new_y[..., [idx_for_new_y]]), dim=0)
-        state["node_eval_counts"][j] += 1
-        idx_for_new_y += 1
-    return new_node
 
 
 def _save_trial_state(
@@ -268,6 +250,9 @@ def _save_trial_state(
         "node_candidates": state["node_candidates"],
         "train_X": state["train_X"],
         "train_Y": state["train_Y"],
+        "train_X_nn": state["train_X_nn"],
+        "train_y_nn": state["train_y_nn"],
+        "partial_buffers": state.get("partial_buffers", None),
         "network_output_at_X": state["network_output_at_X"],
         "random_states": {
             "torch": torch.get_rng_state(),
@@ -276,8 +261,6 @@ def _save_trial_state(
         },
         "test_losses": state["test_losses"] if "test_loss" in metrics else None,
         "best_test_loss": state["best_test_loss"] if "test_loss" in metrics else None,
-        "train_X_nn": state["train_X_nn"],
-        "train_y_nn": state["train_y_nn"],
     }
     torch.save(bo_results, os.path.join(results_dir, f"trial_{trial}.pt"))
 
@@ -321,8 +304,6 @@ def run_one_trial(
         )
         state = _initialize_new_experiment(
             problem=problem,
-            problem_name=problem_name,
-            algo=algo,
             trial=trial,
             n_init_evals=n_init_evals,
             metrics=metrics,
@@ -336,12 +317,12 @@ def run_one_trial(
     test_y = options["test_y"]
     task = options.get("task", "regression")
 
-    while state["total_cost"] < budget:
-        remaining_budget = budget - state["total_cost"]
+    while state["total_cost"] < float(budget):
+        remaining_budget = float(budget) - float(state["total_cost"])
         logger.info(f"Remaining budget: {remaining_budget}")
 
         t0 = time.time()
-        new_x, new_node, acq_val, node_candidate = get_suggested_node_and_input(
+        base_x, eval_x, new_node, acq_val, node_candidate = get_suggested_node_and_input(
             algo=algo,
             remaining_budget=remaining_budget,
             problem=problem,
@@ -352,58 +333,95 @@ def run_one_trial(
         logger.info(f"Optimizing the acquisition takes {t1 - t0:.4f} seconds")
 
         if new_node is None:
-            eval_cost = sum(problem.node_costs)
+            eval_cost = effective_group_cost(problem, list(range(problem.n_nodes)))
         else:
-            eval_cost = sum(problem.node_costs[k] for k in new_node)
+            eval_cost = effective_group_cost(problem, new_node)
 
-        if state["total_cost"] + eval_cost > budget:
+        if state["total_cost"] + eval_cost > float(budget):
+            logger.info("Next evaluation would exceed budget. Stopping.")
             break
 
-        new_y = problem.evaluate(X=new_x, idx=new_node)
+        # IMPORTANT: evaluate with node-specific input eval_x
+        new_y = problem.evaluate(X=eval_x, idx=new_node)
         if noisy:
             new_y = new_y + torch.normal(0, 1, size=new_y.shape)
 
         if new_node is None:
             logger.info(
-                f"Evaluate the full network at input {new_x} "
-                f"(acqf val: {'N/A' if algo == 'Random' else f'{acq_val:.4f}'}): {new_y}"
-            )
-            state["total_cost"] += eval_cost
-            evaluated_nodes = _append_full_observation(
-                problem=problem,
-                new_x=new_x,
-                new_y=new_y,
-                state=state,
+                f"Evaluate the full network at base input {base_x} "
+                f"(eval input {eval_x}) "
+                f"(acqf val: {'N/A' if algo == 'Random' else f'{float(acq_val):.4f}'}): {new_y}"
             )
 
-            nn_optimizer = train_predictor_regression(
-                predictor=predictor,
-                train_X=state["train_X_nn"],
-                train_y=state["train_y_nn"],
-                n_steps=options.get("nn_train_steps", 200),
-                batch_size=options.get("nn_batch_size", 64),
-                optimizer=nn_optimizer,
-            )
-            state["nn_optimizer"] = nn_optimizer
-        else:
             state["total_cost"] += eval_cost
-            idx_group = problem.node_groups.index(new_node)
-            logger.info(
-                f"Evaluate at node {new_node} with input {new_x} "
-                f"(acqf val (over cost): {acq_val[idx_group]:.4f}): {new_y}"
-            )
-            evaluated_nodes = _append_partial_observation(
+
+            # IMPORTANT: store base_x in buffers, not eval_x
+            evaluated_nodes = append_partial_observation(
                 problem=problem,
-                new_x=new_x,
+                base_x=base_x,
+                eval_x=eval_x,
                 new_y=new_y,
                 new_node=new_node,
                 state=state,
             )
-            # Future:
-            # partial-aware trainer call goes here.
+        else:
+            selected_group_idx = None
+            if isinstance(node_candidate, dict):
+                selected_group_idx = node_candidate.get("selected_group_idx", None)
 
-        if "obs_val" in metrics and state["train_y_nn"] is not None:
-            best_obs_val = state["train_y_nn"].max().item()
+            selected_score = float("nan")
+            if selected_group_idx is not None and torch.is_tensor(acq_val):
+                selected_score = float(acq_val[selected_group_idx].item())
+
+            logger.info(
+                f"Evaluate at node {new_node} with base input {base_x} "
+                f"and eval input {eval_x} "
+                f"(effective cost: {eval_cost:.4f}, acqf val (over cost): {selected_score:.4f}): {new_y}"
+            )
+
+            if isinstance(node_candidate, dict):
+                logger.info(
+                    f"[runner] selected_stage={node_candidate.get('selected_stage')}, "
+                    f"stage_uncertainty={node_candidate.get('stage_uncertainty')}"
+                )
+                logger.info(
+                    f"[runner] group_max_uncertainty={node_candidate.get('group_max_uncertainty')}"
+                )
+                logger.info(
+                    f"[runner] group_max_uncertainty_over_cost="
+                    f"{node_candidate.get('group_max_uncertainty_over_cost')}"
+                )
+
+            state["total_cost"] += eval_cost
+
+            # IMPORTANT: store base_x in buffers, not eval_x
+            evaluated_nodes = append_partial_observation(
+                problem=problem,
+                base_x=base_x,
+                eval_x=eval_x,
+                new_y=new_y,
+                new_node=new_node,
+                state=state,
+            )
+
+        # Retrain after both full and partial observations
+        nn_optimizer = train_predictor_partial(
+            predictor=predictor,
+            partial_buffers=state["partial_buffers"],
+            train_X_sink=state["train_X_nn"],
+            train_y_sink=state["train_y_nn"],
+            sink_idx=problem.n_nodes - 1,
+            n_steps=options.get("nn_train_steps", 200),
+            batch_size=options.get("nn_batch_size", 64),
+            aux_nodes_per_step=options.get("aux_nodes_per_step", None),
+            aux_loss_weight=options.get("aux_loss_weight", 1.0),
+            sink_loss_weight=options.get("sink_loss_weight", 1.0),
+            optimizer=nn_optimizer,
+        )
+        state["nn_optimizer"] = nn_optimizer
+
+        if "obs_val" in metrics and state["train_y_nn"] is not None and state["train_y_nn"].shape[0] > 0:
+            best_obs_val = float(state["train_y_nn"].max().item())
             state["best_obs_vals"].append(best_obs_val)
 
         if "test_loss" in metrics:
@@ -424,9 +442,9 @@ def run_one_trial(
         logger.info("==========================================================================")
 
         state["runtimes"].append(t1 - t0)
-        state["cumulative_costs"].append(state["total_cost"])
+        state["cumulative_costs"].append(float(state["total_cost"]))
         state["node_selected"].append(evaluated_nodes)
-        state["node_input_selected"].append(new_x)
+        state["node_input_selected"].append(base_x)   # store external input
         state["node_eval_val"].append(new_y)
         state["acqf_val_list"].append(acq_val)
         state["node_candidates"].append(node_candidate)
