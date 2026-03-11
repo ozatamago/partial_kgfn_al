@@ -96,6 +96,8 @@ def main(
         "1_1": [1, 1],
         "1_49": [1, 49],
         "1_9": [1, 9],
+        "1_3": [1, 3],
+        "1_5": [1, 5],
     }
     if costs not in cost_options:
         raise ValueError(f"Invalid cost option: {costs}")

@@ -17,13 +17,13 @@ def get_default_al_options(problem=None) -> Dict:
         # partial training
         "aux_loss_weight": 1.0,
         "sink_loss_weight": 1.0,
-        "aux_nodes_per_step": None,
+        "nodes_per_step": None,
 
         # partial querying
         "enable_partial_queries": True,
         "group_var_reduction": "sum",
-        "use_upstream_first": True,
-        "uncertainty_threshold_tau": 0.05,
+        "use_upstream_first": False,
+        "uncertainty_threshold_tau": 0.5,
     }
 
     if n_nodes is not None and n_nodes >= 2:

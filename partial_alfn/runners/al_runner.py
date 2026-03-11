@@ -31,7 +31,15 @@ from partial_alfn.data.update_buffers import (
     append_full_observation,
     append_partial_observation,
 )
-from partial_alfn.metrics.evaluation import compute_test_loss
+from partial_alfn.metrics.evaluation import (
+    append_node_metric_history,
+    build_node_test_sets,
+    compute_rollout_node_losses,
+    compute_teacher_forced_node_losses,
+    compute_test_loss,
+    compute_weighted_node_loss,
+    init_node_metric_history,
+)
 from partial_alfn.persistence.checkpoint import (
     load_latest_nn_checkpoint,
     save_nn_checkpoint,
@@ -45,6 +53,78 @@ tkwargs = {
     "dtype": torch.double,
     "device": torch.device("cpu"),
 }
+
+def _prepare_test_artifacts(
+    *,
+    problem: SyntheticTestFunction,
+    options: Dict,
+) -> None:
+    """
+    options に以下が無ければ作る:
+      - full_test_Y
+      - node_test_X
+      - node_test_Y
+    """
+    test_X = options["test_X"]
+
+    if (
+        "full_test_Y" not in options
+        or options["full_test_Y"] is None
+        or "node_test_X" not in options
+        or options["node_test_X"] is None
+        or "node_test_Y" not in options
+        or options["node_test_Y"] is None
+    ):
+        node_test_X, node_test_Y, full_test_Y = build_node_test_sets(
+            problem=problem,
+            base_X=test_X,
+            full_Y=None,
+        )
+        options["full_test_Y"] = full_test_Y
+        options["node_test_X"] = node_test_X
+        options["node_test_Y"] = node_test_Y
+
+
+def _compute_node_metric_snapshot(
+    *,
+    predictor,
+    options: Dict,
+    task: str,
+    sink_idx: int,
+) -> Dict[str, Dict[int, float]]:
+    """
+    現時点の node-wise metric を計算する。
+    """
+    tf_losses = compute_teacher_forced_node_losses(
+        predictor=predictor,
+        node_test_X=options["node_test_X"],
+        node_test_Y=options["node_test_Y"],
+        task=task,
+    )
+
+    rollout_losses = compute_rollout_node_losses(
+        predictor=predictor,
+        base_X=options["test_X"],
+        full_Y=options["full_test_Y"],
+        task=task,
+    )
+
+    return {
+        "teacher_forced": tf_losses,
+        "rollout": rollout_losses,
+        "weighted_teacher_forced_all": {
+            -1: compute_weighted_node_loss(tf_losses)
+        },
+        "weighted_teacher_forced_intermediate": {
+            -1: compute_weighted_node_loss(tf_losses, exclude_nodes=[sink_idx])
+        },
+        "weighted_rollout_all": {
+            -1: compute_weighted_node_loss(rollout_losses)
+        },
+        "weighted_rollout_intermediate": {
+            -1: compute_weighted_node_loss(rollout_losses, exclude_nodes=[sink_idx])
+        },
+    }
 
 
 def _make_results_dir(problem_name: str, problem: SyntheticTestFunction, algo: str) -> str:
@@ -66,6 +146,9 @@ def _initialize_new_experiment(
     test_X = options["test_X"]
     test_y = options["test_y"]
     task = options.get("task", "regression")
+    node_test_X = options["node_test_X"]
+    node_test_Y = options["node_test_Y"]
+    full_test_Y = options["full_test_Y"]
 
     torch.manual_seed(trial)
     np.random.seed(trial)
@@ -120,13 +203,12 @@ def _initialize_new_experiment(
 
     nn_optimizer = train_predictor_partial(
         predictor=predictor,
-        partial_buffers=partial_buffers,
-        train_X_sink=train_X_nn,
-        train_y_sink=train_y_nn,
+        train_X_nodes=train_X,
+        train_Y_nodes=train_Y,
         sink_idx=problem.n_nodes - 1,
         n_steps=options.get("nn_train_steps", 200),
         batch_size=options.get("nn_batch_size", 64),
-        aux_nodes_per_step=options.get("aux_nodes_per_step", None),
+        nodes_per_step=options.get("nodes_per_step", None),
         aux_loss_weight=options.get("aux_loss_weight", 1.0),
         sink_loss_weight=options.get("sink_loss_weight", 1.0),
         optimizer=nn_optimizer,
@@ -150,6 +232,13 @@ def _initialize_new_experiment(
     else:
         test_losses = []
         best_test_loss = float("inf")
+    
+    initial_node_metrics = _compute_node_metric_snapshot(
+        predictor=predictor,
+        options=options,
+        task=task,
+        sink_idx=problem.n_nodes - 1,
+    )
 
     return {
         "train_X": train_X,
@@ -172,6 +261,12 @@ def _initialize_new_experiment(
         "total_cost": 0.0,
         "predictor": predictor,
         "nn_optimizer": nn_optimizer,
+        "node_test_losses_tf": init_node_metric_history(initial_node_metrics["teacher_forced"]),
+        "node_test_losses_rollout": init_node_metric_history(initial_node_metrics["rollout"]),
+        "weighted_node_test_losses_tf_all": init_node_metric_history(initial_node_metrics["weighted_teacher_forced_all"]),
+        "weighted_node_test_losses_tf_intermediate": init_node_metric_history(initial_node_metrics["weighted_teacher_forced_intermediate"]),
+        "weighted_node_test_losses_rollout_all": init_node_metric_history(initial_node_metrics["weighted_rollout_all"]),
+        "weighted_node_test_losses_rollout_intermediate": init_node_metric_history(initial_node_metrics["weighted_rollout_intermediate"]),
     }
 
 
@@ -226,6 +321,12 @@ def _resume_experiment(
         "total_cost": total_cost,
         "predictor": predictor,
         "nn_optimizer": nn_optimizer,
+        "node_test_losses_tf": res.get("node_test_losses_tf", {}),
+        "node_test_losses_rollout": res.get("node_test_losses_rollout", {}),
+        "weighted_node_test_losses_tf_all": res.get("weighted_node_test_losses_tf_all", {}),
+        "weighted_node_test_losses_tf_intermediate": res.get("weighted_node_test_losses_tf_intermediate", {}),
+        "weighted_node_test_losses_rollout_all": res.get("weighted_node_test_losses_rollout_all", {}),
+        "weighted_node_test_losses_rollout_intermediate": res.get("weighted_node_test_losses_rollout_intermediate", {}),
     }
 
 
@@ -261,6 +362,12 @@ def _save_trial_state(
         },
         "test_losses": state["test_losses"] if "test_loss" in metrics else None,
         "best_test_loss": state["best_test_loss"] if "test_loss" in metrics else None,
+        "node_test_losses_tf": state.get("node_test_losses_tf", {}),
+        "node_test_losses_rollout": state.get("node_test_losses_rollout", {}),
+        "weighted_node_test_losses_tf_all": state.get("weighted_node_test_losses_tf_all", {}),
+        "weighted_node_test_losses_tf_intermediate": state.get("weighted_node_test_losses_tf_intermediate", {}),
+        "weighted_node_test_losses_rollout_all": state.get("weighted_node_test_losses_rollout_all", {}),
+        "weighted_node_test_losses_rollout_intermediate": state.get("weighted_node_test_losses_rollout_intermediate", {}),
     }
     torch.save(bo_results, os.path.join(results_dir, f"trial_{trial}.pt"))
 
@@ -281,6 +388,10 @@ def run_one_trial(
         raise ValueError(f"Unsupported algo for AL-only runner: {algo}")
 
     options = options or {}
+    _prepare_test_artifacts(
+        problem=problem,
+        options=options,
+    )
     results_dir = _make_results_dir(problem_name, problem, algo)
 
     if os.path.exists(os.path.join(results_dir, f"trial_{trial}.pt")) and not force_restart:
@@ -407,13 +518,12 @@ def run_one_trial(
         # Retrain after both full and partial observations
         nn_optimizer = train_predictor_partial(
             predictor=predictor,
-            partial_buffers=state["partial_buffers"],
-            train_X_sink=state["train_X_nn"],
-            train_y_sink=state["train_y_nn"],
+            train_X_nodes=state["train_X"],
+            train_Y_nodes=state["train_Y"],
             sink_idx=problem.n_nodes - 1,
             n_steps=options.get("nn_train_steps", 200),
             batch_size=options.get("nn_batch_size", 64),
-            aux_nodes_per_step=options.get("aux_nodes_per_step", None),
+            nodes_per_step=options.get("nodes_per_step", None),
             aux_loss_weight=options.get("aux_loss_weight", 1.0),
             sink_loss_weight=options.get("sink_loss_weight", 1.0),
             optimizer=nn_optimizer,
@@ -437,6 +547,48 @@ def run_one_trial(
                 f"Test loss: {test_loss:.6f} "
                 f"(best {state['best_test_loss']:.6f})"
             )
+
+        node_metric_snapshot = _compute_node_metric_snapshot(
+            predictor=predictor,
+            options=options,
+            task=task,
+            sink_idx=problem.n_nodes - 1,
+        )
+
+        state["node_test_losses_tf"] = append_node_metric_history(
+            state.get("node_test_losses_tf", {}),
+            node_metric_snapshot["teacher_forced"],
+        )
+        state["node_test_losses_rollout"] = append_node_metric_history(
+            state.get("node_test_losses_rollout", {}),
+            node_metric_snapshot["rollout"],
+        )
+        state["weighted_node_test_losses_tf_all"] = append_node_metric_history(
+            state.get("weighted_node_test_losses_tf_all", {}),
+            node_metric_snapshot["weighted_teacher_forced_all"],
+        )
+        state["weighted_node_test_losses_tf_intermediate"] = append_node_metric_history(
+            state.get("weighted_node_test_losses_tf_intermediate", {}),
+            node_metric_snapshot["weighted_teacher_forced_intermediate"],
+        )
+        state["weighted_node_test_losses_rollout_all"] = append_node_metric_history(
+            state.get("weighted_node_test_losses_rollout_all", {}),
+            node_metric_snapshot["weighted_rollout_all"],
+        )
+        state["weighted_node_test_losses_rollout_intermediate"] = append_node_metric_history(
+            state.get("weighted_node_test_losses_rollout_intermediate", {}),
+            node_metric_snapshot["weighted_rollout_intermediate"],
+        )
+
+        tf_str = ", ".join(
+            [f"node{j}={v:.4f}" for j, v in sorted(node_metric_snapshot["teacher_forced"].items())]
+        )
+        ro_str = ", ".join(
+            [f"node{j}={v:.4f}" for j, v in sorted(node_metric_snapshot["rollout"].items())]
+        )
+
+        logger.info(f"Teacher-forced node losses: {tf_str}")
+        logger.info(f"Rollout node losses      : {ro_str}")
 
         logger.info(f"total cost used: {state['total_cost']}")
         logger.info("==========================================================================")

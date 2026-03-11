@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -8,78 +8,90 @@ import torch.nn as nn
 
 def _enable_mc_dropout(m: nn.Module) -> None:
     """
-    Enable dropout layers only, while keeping the rest of the model in eval mode.
+    Turn on dropout layers only, while keeping the rest of the model in eval mode.
     """
     if isinstance(m, (nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         m.train()
 
 
-def _predict_sink(predictor: nn.Module, X: torch.Tensor) -> torch.Tensor:
-    """
-    Return sink prediction with backward compatibility.
+def _validate_predictor_for_propagation(predictor: nn.Module) -> None:
+    required_attrs = ["n_nodes", "sink_idx", "parent_nodes", "active_input_indices"]
+    required_methods = ["make_node_input_from_base", "forward_node"]
 
-    Preferred API:
-      - predictor.forward_sink(X) -> [N, 1]
+    for name in required_attrs:
+        if not hasattr(predictor, name):
+            raise ValueError(f"predictor must define attribute `{name}`")
 
-    Fallback:
-      - predictor(X) -> [N, 1]
-    """
-    if hasattr(predictor, "forward_sink"):
-        return predictor.forward_sink(X)
-    return predictor(X)
-
-
-def _predict_all_nodes(predictor: nn.Module, X: torch.Tensor) -> torch.Tensor:
-    """
-    Return predictions for all node heads.
-
-    Required API for multi-head models:
-      - predictor.forward_all(X) -> [N, n_nodes]
-
-    Fallback:
-      - if model is sink-only, treat it as a single-node model and return [N, 1]
-    """
-    if hasattr(predictor, "forward_all"):
-        return predictor.forward_all(X)
-
-    y = predictor(X)
-    if y.ndim == 1:
-        y = y.unsqueeze(-1)
-    return y
+    for name in required_methods:
+        if not hasattr(predictor, name):
+            raise ValueError(f"predictor must implement method `{name}`")
 
 
 @torch.no_grad()
-def mc_predict_mean_var(
+def mc_sample_all_nodes_from_base(
     predictor: nn.Module,
-    X: torch.Tensor,
+    base_x: torch.Tensor,
     mc_samples: int = 30,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
-    MC-dropout prediction for sink output.
+    Draw MC-dropout samples for all node outputs by propagating sampled parent
+    outputs through the function network.
+
+    Each Monte Carlo pass does:
+      1. sample node 0 from its conditional model
+      2. use that sampled node 0 output to build node 1 input
+      3. sample node 1
+      4. continue in topological order
 
     Args:
         predictor:
-            sink-only model, or multi-head model implementing forward_sink()
-        X:
-            [N, d]
+            node-wise conditional predictor implementing:
+              - predictor.n_nodes
+              - predictor.parent_nodes
+              - predictor.active_input_indices
+              - predictor.make_node_input_from_base(base_x=..., node_idx=..., parent_outputs=...)
+              - predictor.forward_node(x_node, node_idx)
+        base_x:
+            external input tensor [N, d_ext]
         mc_samples:
-            number of stochastic forward passes
+            number of ancestral MC samples
 
     Returns:
-        mean: [N, 1]
-        var:  [N, 1]
+        samples:
+            tensor [S, N, n_nodes]
+            where samples[s, i, j] is sampled output of node j
+            for base point i in Monte Carlo pass s
     """
+    _validate_predictor_for_propagation(predictor)
+
+    if base_x.ndim != 2:
+        raise ValueError(f"base_x must be 2D [N, d_ext], got shape {tuple(base_x.shape)}")
+
     predictor.eval()
     predictor.apply(_enable_mc_dropout)
 
-    outs = []
-    for _ in range(mc_samples):
-        outs.append(_predict_sink(predictor, X))  # [N, 1]
+    all_pass_outputs: List[torch.Tensor] = []
 
-    Y = torch.stack(outs, dim=0)  # [S, N, 1]
-    mean = Y.mean(dim=0)
-    var = Y.var(dim=0, unbiased=False)
-    return mean, var
+    for _ in range(mc_samples):
+        # parent_outputs[j] will hold sampled output of node j in this MC pass
+        parent_outputs: List[torch.Tensor] = [None] * predictor.n_nodes
+        node_outputs_this_pass: List[torch.Tensor] = []
+
+        for j in range(predictor.n_nodes):
+            xj = predictor.make_node_input_from_base(
+                base_x=base_x,
+                node_idx=j,
+                parent_outputs=parent_outputs,
+            )  # [N, d_j]
+
+            yj = predictor.forward_node(xj, j)  # [N, 1]
+            parent_outputs[j] = yj
+            node_outputs_this_pass.append(yj)
+
+        y_all = torch.cat(node_outputs_this_pass, dim=-1)  # [N, n_nodes]
+        all_pass_outputs.append(y_all)
+
+    return torch.stack(all_pass_outputs, dim=0)  # [S, N, n_nodes]
 
 
 @torch.no_grad()
@@ -89,32 +101,65 @@ def mc_predict_mean_var_all_nodes(
     mc_samples: int = 30,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    MC-dropout prediction for all node heads.
+    MC-dropout mean/variance for all nodes, where downstream uncertainty is
+    computed by propagating sampled parent outputs.
 
     Args:
         predictor:
-            multi-head model implementing forward_all(X) -> [N, n_nodes]
-            sink-only models also work and are treated as n_nodes = 1
+            node-wise conditional predictor
         X:
-            [N, d]
+            external input [N, d_ext]
         mc_samples:
-            number of stochastic forward passes
+            number of ancestral MC samples
 
     Returns:
-        mean_all: [N, n_nodes]
-        var_all:  [N, n_nodes]
+        mean_all:
+            [N, n_nodes]
+        var_all:
+            [N, n_nodes]
     """
-    predictor.eval()
-    predictor.apply(_enable_mc_dropout)
+    Y = mc_sample_all_nodes_from_base(
+        predictor=predictor,
+        base_x=X,
+        mc_samples=mc_samples,
+    )  # [S, N, n_nodes]
 
-    outs = []
-    for _ in range(mc_samples):
-        outs.append(_predict_all_nodes(predictor, X))  # [N, n_nodes]
-
-    Y = torch.stack(outs, dim=0)  # [S, N, n_nodes]
     mean_all = Y.mean(dim=0)
     var_all = Y.var(dim=0, unbiased=False)
     return mean_all, var_all
+
+
+@torch.no_grad()
+def mc_predict_mean_var(
+    predictor: nn.Module,
+    X: torch.Tensor,
+    mc_samples: int = 30,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    MC-dropout mean/variance for the sink node, with propagated uncertainty.
+
+    Args:
+        predictor:
+            node-wise conditional predictor with sink_idx
+        X:
+            external input [N, d_ext]
+        mc_samples:
+            number of ancestral MC samples
+
+    Returns:
+        mean_sink:
+            [N, 1]
+        var_sink:
+            [N, 1]
+    """
+    mean_all, var_all = mc_predict_mean_var_all_nodes(
+        predictor=predictor,
+        X=X,
+        mc_samples=mc_samples,
+    )
+
+    sink_idx = int(predictor.sink_idx)
+    return mean_all[:, [sink_idx]], var_all[:, [sink_idx]]
 
 
 def reduce_group_variances(
@@ -147,6 +192,7 @@ def reduce_group_variances(
     for group in node_groups:
         if len(group) == 0:
             raise ValueError("Empty node group is not allowed.")
+
         vg = var_all[:, list(group)]  # [N, |group|]
 
         if reduction == "sum":
@@ -168,21 +214,11 @@ def cost_aware_group_scores(
     eps: float = 1e-12,
 ) -> torch.Tensor:
     """
-    Convert group utilities into utility / cost scores.
+    Convert group utilities into utility / cost scores using direct node-group cost.
 
-    Args:
-        group_var:
-            [N, n_groups]
-        node_groups:
-            list of node groups aligned with columns of group_var
-        node_costs:
-            per-node costs
-        eps:
-            numerical guard
-
-    Returns:
-        scores:
-            [N, n_groups]
+    Note:
+        If you use effective ancestor-closure cost elsewhere, override this logic
+        outside this function.
     """
     if group_var.ndim != 2:
         raise ValueError(f"group_var must be [N, n_groups], got shape {tuple(group_var.shape)}")
@@ -196,7 +232,7 @@ def cost_aware_group_scores(
         group_costs,
         dtype=group_var.dtype,
         device=group_var.device,
-    ).view(1, -1)  # [1, n_groups]
+    ).view(1, -1)
 
     return group_var / (cost_tensor + eps)
 
@@ -205,7 +241,7 @@ def select_top_cost_aware_action(
     scores: torch.Tensor,
 ) -> Tuple[int, int, float]:
     """
-    Select the best (candidate_idx, group_idx) from scores.
+    Select the best (candidate_idx, group_idx) from a score matrix.
 
     Args:
         scores:

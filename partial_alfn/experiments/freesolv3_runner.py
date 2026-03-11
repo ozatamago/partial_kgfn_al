@@ -34,8 +34,10 @@ def main(
 ) -> None:
     cost_options = {
         "1_1": [1, 1],
-        "1_9": [1, 9],
         "1_49": [1, 49],
+        "1_9": [1, 9],
+        "1_3": [1, 3],
+        "1_5": [1, 5],
     }
     if costs not in cost_options:
         raise ValueError(f"Invalid cost option: {costs}")
@@ -49,9 +51,16 @@ def main(
 
     metrics = ["obs_val", "test_loss"]
 
+    node_input_dims = [
+        len(problem.parent_nodes[j]) + len(problem.active_input_indices[j])
+        for j in range(problem.n_nodes)
+    ]
+
     predictor = MultiHeadMCDropoutMLP(
-        in_dim=problem.dim,
-        n_nodes=problem.n_nodes,
+        external_input_dim=problem.dim,
+        node_input_dims=node_input_dims,
+        parent_nodes=problem.parent_nodes,
+        active_input_indices=problem.active_input_indices,
         hidden=256,
         p_drop=0.1,
         sink_idx=problem.n_nodes - 1,
