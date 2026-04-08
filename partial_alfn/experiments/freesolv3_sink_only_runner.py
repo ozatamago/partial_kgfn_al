@@ -24,6 +24,7 @@ import argparse
 import os
 import random
 import time
+from copy import deepcopy
 from typing import Dict, Optional
 
 import numpy as np
@@ -100,6 +101,31 @@ def mc_predict_mean_var_sink(
         outs.append(predictor.forward_sink(X))  # [N, 1]
 
     Y = torch.stack(outs, dim=0)  # [S, N, 1]
+    mean = Y.mean(dim=0)
+    var = Y.var(dim=0, unbiased=False)
+    return mean, var
+
+
+@torch.no_grad()
+def mc_predict_mean_var_all(
+    predictor: nn.Module,
+    X: torch.Tensor,
+    mc_samples: int = 30,
+):
+    """
+    MC-dropout estimate for all node outputs.
+    Returns:
+        mean_all: [N, n_nodes]
+        var_all:  [N, n_nodes]
+    """
+    predictor.eval()
+    predictor.apply(_enable_mc_dropout)
+
+    outs = []
+    for _ in range(mc_samples):
+        outs.append(predictor.forward_all(X))  # [N, n_nodes]
+
+    Y = torch.stack(outs, dim=0)  # [S, N, n_nodes]
     mean = Y.mean(dim=0)
     var = Y.var(dim=0, unbiased=False)
     return mean, var
@@ -234,13 +260,84 @@ def train_full_output_predictor(
     return optimizer
 
 
+def score_candidate_by_fantasy_gain(
+    *,
+    predictor: nn.Module,
+    train_X: torch.Tensor,
+    train_Y_full: torch.Tensor,
+    base_x: torch.Tensor,
+    selector_holdout_X: torch.Tensor,
+    selector_holdout_y_sink: torch.Tensor,
+    mc_samples: int = 30,
+    fantasy_train_steps: int = 20,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-6,
+    sink_loss_weight: float = 1.0,
+    intermediate_loss_weight: float = 1.0,
+) -> float:
+    """
+    Fantasy gain = current_holdout_loss - fantasy_holdout_loss
+    where the fantasy label is the MC-dropout predictive mean of all node outputs.
+    """
+    current_holdout_loss = compute_sink_test_loss(
+        predictor=predictor,
+        test_X=selector_holdout_X,
+        test_y_sink=selector_holdout_y_sink,
+    )
+
+    mean_all, _ = mc_predict_mean_var_all(
+        predictor=predictor,
+        X=base_x,
+        mc_samples=mc_samples,
+    )  # [1, n_nodes]
+
+    fantasy_predictor = deepcopy(predictor)
+
+    fantasy_train_X = torch.cat((train_X, base_x), dim=0)
+    fantasy_train_Y_full = torch.cat((train_Y_full, mean_all), dim=0)
+
+    train_full_output_predictor(
+        predictor=fantasy_predictor,
+        train_X=fantasy_train_X,
+        train_Y_full=fantasy_train_Y_full,
+        n_steps=fantasy_train_steps,
+        batch_size=batch_size,
+        lr=lr,
+        weight_decay=weight_decay,
+        sink_loss_weight=sink_loss_weight,
+        intermediate_loss_weight=intermediate_loss_weight,
+        optimizer=None,
+    )
+
+    fantasy_holdout_loss = compute_sink_test_loss(
+        predictor=fantasy_predictor,
+        test_X=selector_holdout_X,
+        test_y_sink=selector_holdout_y_sink,
+    )
+
+    return float(current_holdout_loss - fantasy_holdout_loss)
+
+
 def select_next_input(
     algo: str,
     problem,
     predictor: nn.Module,
     *,
+    train_X: Optional[torch.Tensor] = None,
+    train_Y_full: Optional[torch.Tensor] = None,
+    acquisition_mode: str = "uncertainty",
+    selector_holdout_X: Optional[torch.Tensor] = None,
+    selector_holdout_y_sink: Optional[torch.Tensor] = None,
     mc_samples: int = 30,
     n_sobol: int = 256,
+    fantasy_topk_candidates: int = 8,
+    fantasy_train_steps: int = 20,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-6,
+    sink_loss_weight: float = 1.0,
+    intermediate_loss_weight: float = 1.0,
 ) -> Dict:
     """
     Returns:
@@ -266,28 +363,106 @@ def select_next_input(
     if algo != "NN_UQ":
         raise ValueError(f"Unsupported algo: {algo}")
 
+    if acquisition_mode not in ["uncertainty", "fantasy"]:
+        raise ValueError(f"Unsupported acquisition_mode: {acquisition_mode}")
+
     Xcand = make_candidates(problem, n_sobol=n_sobol)
-    _, var = mc_predict_mean_var_sink(
+    _, var_sink = mc_predict_mean_var_sink(
         predictor=predictor,
         X=Xcand,
         mc_samples=mc_samples,
     )  # [N, 1]
 
-    idx = torch.argmax(var.view(-1))
-    base_x = Xcand[idx: idx + 1]
-    score = float(var[idx].item())
+    sink_scores = var_sink.view(-1)
+
+    if acquisition_mode == "uncertainty":
+        idx = torch.argmax(sink_scores)
+        base_x = Xcand[idx: idx + 1]
+        score = float(sink_scores[idx].item())
+
+        logger.info(
+            f"[selector-sink-only] mode=uncertainty | "
+            f"max_sink_uncertainty={float(sink_scores.max().item()):.6f}"
+        )
+
+        return {
+            "base_x": base_x,
+            "score": score,
+            "debug": {
+                "mode": "sink_only_uq",
+                "selected_candidate_idx": int(idx.item()),
+                "max_sink_uncertainty": float(sink_scores.max().item()),
+            },
+        }
+
+    if train_X is None or train_Y_full is None:
+        raise ValueError("train_X and train_Y_full are required for fantasy mode.")
+    if selector_holdout_X is None or selector_holdout_y_sink is None:
+        raise ValueError(
+            "selector_holdout_X and selector_holdout_y_sink are required for fantasy mode."
+        )
+
+    k = min(fantasy_topk_candidates, Xcand.shape[0])
+    shortlist = torch.topk(sink_scores, k=k).indices.tolist()
+
+    best_idx = None
+    best_gain = None
+
+    for idx_candidate in shortlist:
+        base_x_candidate = Xcand[idx_candidate: idx_candidate + 1]
+
+        fantasy_gain = score_candidate_by_fantasy_gain(
+            predictor=predictor,
+            train_X=train_X,
+            train_Y_full=train_Y_full,
+            base_x=base_x_candidate,
+            selector_holdout_X=selector_holdout_X,
+            selector_holdout_y_sink=selector_holdout_y_sink,
+            mc_samples=mc_samples,
+            fantasy_train_steps=fantasy_train_steps,
+            batch_size=batch_size,
+            lr=lr,
+            weight_decay=weight_decay,
+            sink_loss_weight=sink_loss_weight,
+            intermediate_loss_weight=intermediate_loss_weight,
+        )
+
+        if best_gain is None or fantasy_gain > best_gain:
+            best_gain = fantasy_gain
+            best_idx = idx_candidate
+
+    if best_idx is None:
+        idx = torch.argmax(sink_scores)
+        base_x = Xcand[idx: idx + 1]
+        score = float(sink_scores[idx].item())
+        return {
+            "base_x": base_x,
+            "score": score,
+            "debug": {
+                "mode": "sink_only_fantasy_fallback_to_uncertainty",
+                "selected_candidate_idx": int(idx.item()),
+                "max_sink_uncertainty": float(sink_scores.max().item()),
+            },
+        }
+
+    base_x = Xcand[best_idx: best_idx + 1]
+    score = float(best_gain)
 
     logger.info(
-        f"[selector-sink-only] max_sink_uncertainty={float(var.max().item()):.6f}"
+        f"[selector-sink-only] mode=fantasy | "
+        f"best_fantasy_gain={best_gain:.6f} | "
+        f"shortlist_topk={k}"
     )
 
     return {
         "base_x": base_x,
         "score": score,
         "debug": {
-            "mode": "sink_only_uq",
-            "selected_candidate_idx": int(idx.item()),
-            "max_sink_uncertainty": float(var.max().item()),
+            "mode": "sink_only_fantasy",
+            "selected_candidate_idx": int(best_idx),
+            "best_fantasy_gain": float(best_gain),
+            "shortlist_topk": int(k),
+            "max_sink_uncertainty": float(sink_scores.max().item()),
         },
     }
 
@@ -300,11 +475,18 @@ def run_one_trial(
     trial: int,
     budget: int,
     noisy: bool,
+    acquisition_mode: str = "uncertainty",
+    fantasy_topk_candidates: int = 8,
+    fantasy_train_steps: int = 20,
 ) -> None:
     if algo not in ["Random", "NN_UQ"]:
         raise ValueError(f"Unsupported algo: {algo}")
 
-    results_dir = f"./results_sink_only/{problem_name}_{'_'.join(str(x) for x in problem.node_costs)}/{algo}/"
+    results_dir = (
+        f"./results_sink_only/"
+        f"{problem_name}_{'_'.join(str(x) for x in problem.node_costs)}/"
+        f"{algo}_{acquisition_mode}/"
+    )    
     os.makedirs(results_dir, exist_ok=True)
 
     logger.info(
@@ -325,7 +507,17 @@ def run_one_trial(
         p_drop=0.1,
     ).to(torch.get_default_dtype())
 
-    test_X, test_Y_full, test_y_sink = make_test_set(problem, n_test=512, seed=trial + 12345)
+    val_X, val_Y_full, val_y_sink = make_test_set(
+        problem,
+        n_test=256,
+        seed=trial + 54321,
+    )
+
+    test_X, test_Y_full, test_y_sink = make_test_set(
+        problem,
+        n_test=512,
+        seed=trial + 12345,
+    )
 
     # Initial design
     n_init_evals = 2 * problem.dim + 1
@@ -406,8 +598,20 @@ def run_one_trial(
             algo=algo,
             problem=problem,
             predictor=predictor,
+            train_X=train_X,
+            train_Y_full=train_Y_full,
+            acquisition_mode=acquisition_mode,
+            selector_holdout_X=val_X,
+            selector_holdout_y_sink=val_y_sink,
             mc_samples=30,
             n_sobol=256,
+            fantasy_topk_candidates=fantasy_topk_candidates,
+            fantasy_train_steps=fantasy_train_steps,
+            batch_size=64,
+            lr=1e-3,
+            weight_decay=1e-6,
+            sink_loss_weight=1.0,
+            intermediate_loss_weight=1.0,
         )
         t1 = time.time()
 
@@ -519,6 +723,14 @@ def parse():
     parser.add_argument("--costs", "-c", type=str, required=True)
     parser.add_argument("--budget", "-b", type=int, default=200)
     parser.add_argument("--noisy", action="store_true")
+    parser.add_argument(
+        "--acquisition_mode",
+        type=str,
+        default="uncertainty",
+        choices=["uncertainty", "fantasy"],
+    )
+    parser.add_argument("--fantasy_topk_candidates", type=int, default=8)
+    parser.add_argument("--fantasy_train_steps", type=int, default=20)
     return parser.parse_args()
 
 
@@ -528,6 +740,9 @@ def main(
     costs: str,
     budget: int,
     noisy: bool = False,
+    acquisition_mode: str = "uncertainty",
+    fantasy_topk_candidates: int = 8,
+    fantasy_train_steps: int = 20,
 ) -> None:
     cost_options = {
         "1_1": [1, 1],
@@ -549,6 +764,9 @@ def main(
         trial=trial,
         budget=budget,
         noisy=noisy,
+        acquisition_mode=acquisition_mode,
+        fantasy_topk_candidates=fantasy_topk_candidates,
+        fantasy_train_steps=fantasy_train_steps,
     )
 
 

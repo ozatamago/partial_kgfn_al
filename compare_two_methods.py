@@ -573,7 +573,7 @@ def maybe_save_plot(
 
     plt.figure(figsize=(8, 5))
     plt.plot(a["costs"], a["losses"], label=a["name"])
-    plt.plot(b["costs"], b["losses"], label="final_output_only")
+    plt.plot(b["costs"], b["losses"], label=b["name"])
     plt.xlabel("Cumulative cost")
     plt.ylabel("Test loss")
     plt.title("Method comparison: test loss vs cumulative cost")

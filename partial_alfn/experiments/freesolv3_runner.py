@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 r"""
-FreeSolv problem runner for AL-style NN_UQ experiments.
+FreeSolv problem runner for AL-style fantasy-gain NN_UQ experiments.
 """
 
 import logging
@@ -66,6 +66,12 @@ def main(
         sink_idx=problem.n_nodes - 1,
     ).to(torch.get_default_dtype())
 
+    val_X, val_y = make_test_set(
+        problem=problem,
+        n_test=256,
+        seed=trial + 54321,
+    )
+
     test_X, test_y = make_test_set(
         problem=problem,
         n_test=512,
@@ -75,11 +81,25 @@ def main(
     options = get_default_al_options(problem)
     options.update({
         "predictor": predictor,
+
+        # Reporting holdout
         "test_X": test_X,
         "test_y": test_y,
+
+        # Selector holdout
+        "val_X": val_X,
+        "val_y": val_y,
+
         "task": "regression",
 
-        # Freesolv3-specific override if needed
+        # Acquisition behavior
+        "selector_objective": "fantasy_gain",
+        "selector_metric": "sink_test_loss",
+        "fantasy_train_steps": 20,
+        "fantasy_topk_candidates": 8,
+        "fantasy_topk_groups": 2,
+
+        # Freesolv3-specific group override
         "upstream_group_indices": [0],
         "downstream_group_indices": [1],
     })

@@ -60,10 +60,7 @@ def _prepare_test_artifacts(
     options: Dict,
 ) -> None:
     """
-    options に以下が無ければ作る:
-      - full_test_Y
-      - node_test_X
-      - node_test_Y
+    Create test artifacts used for reporting.
     """
     test_X = options["test_X"]
 
@@ -84,6 +81,45 @@ def _prepare_test_artifacts(
         options["node_test_X"] = node_test_X
         options["node_test_Y"] = node_test_Y
 
+
+def _prepare_selector_holdout(options: Dict) -> None:
+    """
+    Prepare the holdout set used by the acquisition selector.
+
+    Preferred:
+        - options["val_X"], options["val_y"]
+
+    Fallback:
+        - options["test_X"], options["test_y"]
+
+    This helper only prepares references in `options`.
+    The actual fantasy scoring logic will live in the selector.
+    """
+    if "selector_holdout_X" not in options or options["selector_holdout_X"] is None:
+        if "val_X" in options and options["val_X"] is not None:
+            options["selector_holdout_X"] = options["val_X"]
+        else:
+            options["selector_holdout_X"] = options["test_X"]
+            logger.warning(
+                "selector_holdout_X was not provided. Falling back to test_X. "
+                "For proper model selection, pass val_X explicitly."
+            )
+
+    if "selector_holdout_y" not in options or options["selector_holdout_y"] is None:
+        if "val_y" in options and options["val_y"] is not None:
+            options["selector_holdout_y"] = options["val_y"]
+        else:
+            options["selector_holdout_y"] = options["test_y"]
+            logger.warning(
+                "selector_holdout_y was not provided. Falling back to test_y. "
+                "For proper model selection, pass val_y explicitly."
+            )
+
+    options.setdefault("selector_objective", "fantasy_gain")
+    options.setdefault("selector_metric", "sink_test_loss")
+    options.setdefault("fantasy_train_steps", 20)
+    options.setdefault("fantasy_topk_candidates", 8)
+    options.setdefault("fantasy_topk_groups", 2)
 
 def _compute_node_metric_snapshot(
     *,
@@ -388,10 +424,13 @@ def run_one_trial(
         raise ValueError(f"Unsupported algo for AL-only runner: {algo}")
 
     options = options or {}
+
     _prepare_test_artifacts(
         problem=problem,
         options=options,
     )
+    _prepare_selector_holdout(options)
+
     results_dir = _make_results_dir(problem_name, problem, algo)
 
     if os.path.exists(os.path.join(results_dir, f"trial_{trial}.pt")) and not force_restart:
@@ -424,9 +463,20 @@ def run_one_trial(
 
     predictor = state["predictor"]
     nn_optimizer = state["nn_optimizer"]
+
     test_X = options["test_X"]
     test_y = options["test_y"]
+
+    selector_holdout_X = options["selector_holdout_X"]
+    selector_holdout_y = options["selector_holdout_y"]
+
     task = options.get("task", "regression")
+
+    logger.info(
+        f"Selector objective: {options.get('selector_objective')} | "
+        f"selector metric: {options.get('selector_metric')} | "
+        f"selector holdout size: {selector_holdout_X.shape[0]}"
+    )
 
     while state["total_cost"] < float(budget):
         remaining_budget = float(budget) - float(state["total_cost"])
@@ -439,6 +489,7 @@ def run_one_trial(
             problem=problem,
             predictor=predictor,
             options=options,
+            state=state,
         )
         t1 = time.time()
         logger.info(f"Optimizing the acquisition takes {t1 - t0:.4f} seconds")
