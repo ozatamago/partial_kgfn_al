@@ -9,7 +9,7 @@ import warnings
 
 import torch
 
-from partial_alfn.models.multihead_mc_dropout_mlp import MultiHeadMCDropoutMLP
+from partial_alfn.models.model_factory import build_predictor
 from partial_alfn.runners.al_runner import run_one_trial
 from partial_alfn.runners.cli import parse
 from partial_alfn.data.testset import make_test_set
@@ -31,6 +31,14 @@ def main(
     costs: str,
     budget: int,
     noisy: bool = False,
+    predictor_type: str = "mcd",
+    hidden: int = 256,
+    p_drop: float = 0.1,
+    mc_samples: int = 30,
+    dkl_inference: str = "exact",
+    dkl_feature_dim: int = 32,
+    dkl_kernel: str = "rbf",
+    n_posterior_samples: int = 64,
 ) -> None:
     cost_options = {
         "1_1": [1, 1],
@@ -51,20 +59,13 @@ def main(
 
     metrics = ["obs_val", "test_loss"]
 
-    node_input_dims = [
-        len(problem.parent_nodes[j]) + len(problem.active_input_indices[j])
-        for j in range(problem.n_nodes)
-    ]
+    options = get_default_al_options(problem)
 
-    predictor = MultiHeadMCDropoutMLP(
-        external_input_dim=problem.dim,
-        node_input_dims=node_input_dims,
-        parent_nodes=problem.parent_nodes,
-        active_input_indices=problem.active_input_indices,
-        hidden=256,
-        p_drop=0.1,
-        sink_idx=problem.n_nodes - 1,
-    ).to(torch.get_default_dtype())
+    # Example:
+    # options["predictor_type"] = "mcd"
+    # options["predictor_type"] = "dkl"
+
+    predictor = build_predictor(problem, options)
 
     val_X, val_y = make_test_set(
         problem=problem,
@@ -80,26 +81,32 @@ def main(
 
     options = get_default_al_options(problem)
     options.update({
-        "predictor": predictor,
+        "predictor_type": predictor_type,
+        "hidden": hidden,
+        "p_drop": p_drop,
+        "mc_samples": mc_samples,
+        "dkl_inference": dkl_inference,
+        "dkl_feature_dim": dkl_feature_dim,
+        "dkl_kernel": dkl_kernel,
+        "feature_dim": dkl_feature_dim,
+        "kernel_type": dkl_kernel,
+        "n_posterior_samples": n_posterior_samples,
+    })
 
-        # Reporting holdout
+    predictor = build_predictor(problem, options)
+
+    options.update({
+        "predictor": predictor,
         "test_X": test_X,
         "test_y": test_y,
-
-        # Selector holdout
         "val_X": val_X,
         "val_y": val_y,
-
         "task": "regression",
-
-        # Acquisition behavior
         "selector_objective": "fantasy_gain",
         "selector_metric": "sink_test_loss",
         "fantasy_train_steps": 20,
         "fantasy_topk_candidates": 8,
         "fantasy_topk_groups": 2,
-
-        # Freesolv3-specific group override
         "upstream_group_indices": [0],
         "downstream_group_indices": [1],
     })

@@ -45,7 +45,7 @@ from partial_alfn.persistence.checkpoint import (
     save_nn_checkpoint,
 )
 from partial_alfn.policies.select_next_query import get_suggested_node_and_input
-from partial_alfn.training.train_partial import train_predictor_partial
+from partial_alfn.training.train_factory import train_predictor_partial_backend
 from partial_alfn.utils.construct_obs_set import construct_obs_set
 from partial_alfn.utils.effective_costs import effective_group_cost
 
@@ -230,25 +230,24 @@ def _initialize_new_experiment(
         x=X,
         y_full=network_output_at_X,
     )
-
+    
     nn_optimizer = torch.optim.Adam(
         predictor.parameters(),
         lr=options.get("nn_lr", 1e-3),
         weight_decay=options.get("nn_weight_decay", 1e-6),
     )
 
-    nn_optimizer = train_predictor_partial(
+    maybe_optimizer = train_predictor_partial_backend(
         predictor=predictor,
         train_X_nodes=train_X,
         train_Y_nodes=train_Y,
+        options=options,
         sink_idx=problem.n_nodes - 1,
-        n_steps=options.get("nn_train_steps", 200),
-        batch_size=options.get("nn_batch_size", 64),
-        nodes_per_step=options.get("nodes_per_step", None),
-        aux_loss_weight=options.get("aux_loss_weight", 1.0),
-        sink_loss_weight=options.get("sink_loss_weight", 1.0),
         optimizer=nn_optimizer,
     )
+
+    if maybe_optimizer is not None:
+        nn_optimizer = maybe_optimizer
 
     if "obs_val" in metrics:
         best_obs_vals = [float(train_y_nn.max().item())]
@@ -567,18 +566,18 @@ def run_one_trial(
             )
 
         # Retrain after both full and partial observations
-        nn_optimizer = train_predictor_partial(
+        maybe_optimizer = train_predictor_partial_backend(
             predictor=predictor,
             train_X_nodes=state["train_X"],
             train_Y_nodes=state["train_Y"],
+            options=options,
             sink_idx=problem.n_nodes - 1,
-            n_steps=options.get("nn_train_steps", 200),
-            batch_size=options.get("nn_batch_size", 64),
-            nodes_per_step=options.get("nodes_per_step", None),
-            aux_loss_weight=options.get("aux_loss_weight", 1.0),
-            sink_loss_weight=options.get("sink_loss_weight", 1.0),
             optimizer=nn_optimizer,
         )
+
+        if maybe_optimizer is not None:
+            nn_optimizer = maybe_optimizer
+
         state["nn_optimizer"] = nn_optimizer
 
         if "obs_val" in metrics and state["train_y_nn"] is not None and state["train_y_nn"].shape[0] > 0:

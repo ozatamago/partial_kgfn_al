@@ -13,10 +13,12 @@ from partial_alfn.data.update_buffers import append_partial_observation
 from partial_alfn.metrics.evaluation import compute_test_loss
 from partial_alfn.policies.candidates import make_candidates
 from partial_alfn.policies.node_input_builder import build_eval_input_for_node_group
-from partial_alfn.training.train_partial import train_predictor_partial
+from partial_alfn.training.train_factory import train_predictor_partial_backend
+from partial_alfn.uncertainty.base import (
+    predict_mean_var,
+    predict_mean_var_all_nodes,
+)
 from partial_alfn.uncertainty.mc_dropout import (
-    mc_predict_mean_var,
-    mc_predict_mean_var_all_nodes,
     reduce_group_variances,
     select_top_cost_aware_action,
 )
@@ -89,6 +91,17 @@ def _best_group_scores(scores: torch.Tensor) -> torch.Tensor:
     return scores.max(dim=0).values
 
 
+def _make_uncertainty_options(
+    options: Dict,
+    mc_samples: int,
+) -> Dict:
+    return {
+        "mc_samples": int(mc_samples),
+        "n_samples": int(options.get("n_posterior_samples", mc_samples)),
+        "unbiased": bool(options.get("unbiased_var", False)),
+    }
+
+
 def _clone_optional_tensor(x: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     if x is None:
         return None
@@ -127,13 +140,18 @@ def _score_candidate_group_by_fantasy_gain(
     fantasy_train_steps = int(options.get("fantasy_train_steps", 20))
     task = options.get("task", "regression")
 
+    uncertainty_options = _make_uncertainty_options(
+        options=options,
+        mc_samples=mc_samples,
+    )
+
     fantasy_predictor = deepcopy(predictor)
     fantasy_state = _clone_state_for_fantasy(state)
 
-    pred_mean_all, _ = mc_predict_mean_var_all_nodes(
+    pred_mean_all, _ = predict_mean_var_all_nodes(
         predictor=predictor,
         X=base_x,
-        mc_samples=mc_samples,
+        options=uncertainty_options,
     )
 
     fantasy_y = pred_mean_all[:, list(node_group)]
@@ -148,16 +166,15 @@ def _score_candidate_group_by_fantasy_gain(
         sink_node_idx=problem.n_nodes - 1,
     )
 
-    train_predictor_partial(
+    fantasy_train_options = dict(options)
+    fantasy_train_options["n_steps"] = fantasy_train_steps
+
+    _ = train_predictor_partial_backend(
         predictor=fantasy_predictor,
         train_X_nodes=fantasy_state["train_X"],
         train_Y_nodes=fantasy_state["train_Y"],
+        options=fantasy_train_options,
         sink_idx=problem.n_nodes - 1,
-        n_steps=fantasy_train_steps,
-        batch_size=int(options.get("nn_batch_size", 64)),
-        nodes_per_step=options.get("nodes_per_step", None),
-        aux_loss_weight=float(options.get("aux_loss_weight", 1.0)),
-        sink_loss_weight=float(options.get("sink_loss_weight", 1.0)),
         optimizer=None,
     )
 
@@ -221,11 +238,18 @@ def get_suggested_node_and_input(
 
     # Full-evaluation fallback: choose x by sink uncertainty
     if not enable_partial_queries:
-        _, pred_var = mc_predict_mean_var(
-            predictor=predictor,
-            X=Xcand,
+        uncertainty_options = _make_uncertainty_options(
+            options=options,
             mc_samples=mc_samples,
         )
+
+        _, pred_var = predict_mean_var(
+            predictor=predictor,
+            X=Xcand,
+            node_idx=None,
+            options=uncertainty_options,
+        )
+
         idx = torch.argmax(pred_var.view(-1))
         base_x = Xcand[idx : idx + 1]
         eval_x = base_x
@@ -247,10 +271,15 @@ def get_suggested_node_and_input(
     tau = float(options.get("uncertainty_threshold_tau", 100.0))
 
     # Predict node-wise uncertainties over external-input candidates
-    _, var_all = mc_predict_mean_var_all_nodes(
+    uncertainty_options = _make_uncertainty_options(
+        options=options,
+        mc_samples=mc_samples,
+    )
+
+    _, var_all = predict_mean_var_all_nodes(
         predictor=predictor,
         X=Xcand,
-        mc_samples=mc_samples,
+        options=uncertainty_options,
     )  # [N, n_nodes]
 
     # Group-wise uncertainty proxy used only for shortlist
@@ -276,12 +305,6 @@ def get_suggested_node_and_input(
 
     selector_holdout_X = options["selector_holdout_X"]
     selector_holdout_y = options["selector_holdout_y"]
-    current_holdout_loss = compute_test_loss(
-        predictor=predictor,
-        test_X=selector_holdout_X,
-        test_y=selector_holdout_y,
-        task=options.get("task", "regression"),
-    )
 
     fantasy_topk_candidates = int(options.get("fantasy_topk_candidates", 8))
     fantasy_topk_groups = int(options.get("fantasy_topk_groups", 2))
@@ -292,11 +315,13 @@ def get_suggested_node_and_input(
 
     # If no partial group is affordable, fall back to full-network UQ
     if len(affordable_group_indices) == 0:
-        _, pred_var = mc_predict_mean_var(
+        _, pred_var = predict_mean_var(
             predictor=predictor,
             X=Xcand,
-            mc_samples=mc_samples,
+            node_idx=None,
+            options=uncertainty_options,
         )
+
         idx = torch.argmax(pred_var.view(-1))
         base_x = Xcand[idx : idx + 1]
         eval_x = base_x
@@ -356,97 +381,122 @@ def get_suggested_node_and_input(
         active_group_indices = affordable_group_indices
         selected_stage = "all"
 
-    if state is None:
-        raise ValueError(
-                "state must be provided when selector_objective uses fantasy gain."
-        )
+    selector_objective = str(
+        options.get("selector_objective", "fantasy_gain")
+    ).lower()
 
     masked_proxy_scores = _masked_scores_for_group_subset(
         scores=proxy_scores,
         active_group_indices=active_group_indices,
     )
 
-    fantasy_scores = torch.full_like(masked_proxy_scores, float("-inf"))
+    current_holdout_loss = None
 
-    group_best_proxy_scores = _best_group_scores(masked_proxy_scores)
-    finite_group_mask = torch.isfinite(group_best_proxy_scores)
+    if selector_objective == "uncertainty":
+        masked_scores = masked_proxy_scores
+        selection_mode = "partial_group_uncertainty"
 
-    if finite_group_mask.any():
-        finite_group_indices = torch.nonzero(
-            finite_group_mask,
-            as_tuple=False,
-        ).view(-1)
+    elif selector_objective == "fantasy_gain":
+        if state is None:
+            raise ValueError(
+                "state must be provided when selector_objective uses fantasy gain."
+            )
 
-        n_group_select = min(fantasy_topk_groups, finite_group_indices.numel())
-        shortlisted_group_positions = torch.topk(
-            group_best_proxy_scores[finite_group_indices],
-            k=n_group_select,
-        ).indices
-        shortlisted_group_indices = finite_group_indices[
-            shortlisted_group_positions
-        ].tolist()
+        current_holdout_loss = compute_test_loss(
+            predictor=predictor,
+            test_X=selector_holdout_X,
+            test_y=selector_holdout_y,
+            task=options.get("task", "regression"),
+        )
 
-        for group_idx_candidate in shortlisted_group_indices:
-            per_group_proxy_scores = masked_proxy_scores[:, group_idx_candidate]
-            finite_candidate_mask = torch.isfinite(per_group_proxy_scores)
+        fantasy_scores = torch.full_like(masked_proxy_scores, float("-inf"))
 
-            if not finite_candidate_mask.any():
-                continue
+        group_best_proxy_scores = _best_group_scores(masked_proxy_scores)
+        finite_group_mask = torch.isfinite(group_best_proxy_scores)
 
-            finite_candidate_indices = torch.nonzero(
-                finite_candidate_mask,
+        if finite_group_mask.any():
+            finite_group_indices = torch.nonzero(
+                finite_group_mask,
                 as_tuple=False,
             ).view(-1)
 
-            n_candidate_select = min(
-                fantasy_topk_candidates,
-                finite_candidate_indices.numel(),
-            )
-
-            shortlisted_candidate_positions = torch.topk(
-                per_group_proxy_scores[finite_candidate_indices],
-                k=n_candidate_select,
+            n_group_select = min(fantasy_topk_groups, finite_group_indices.numel())
+            shortlisted_group_positions = torch.topk(
+                group_best_proxy_scores[finite_group_indices],
+                k=n_group_select,
             ).indices
-
-            shortlisted_candidate_indices = finite_candidate_indices[
-                shortlisted_candidate_positions
+            shortlisted_group_indices = finite_group_indices[
+                shortlisted_group_positions
             ].tolist()
 
-            node_group_candidate = list(node_groups[group_idx_candidate])
+            for group_idx_candidate in shortlisted_group_indices:
+                per_group_proxy_scores = masked_proxy_scores[:, group_idx_candidate]
+                finite_candidate_mask = torch.isfinite(per_group_proxy_scores)
 
-            for cand_idx_candidate in shortlisted_candidate_indices:
-                base_x_candidate = Xcand[cand_idx_candidate : cand_idx_candidate + 1]
+                if not finite_candidate_mask.any():
+                    continue
 
-                eval_x_candidate = build_eval_input_for_node_group(
-                    predictor=predictor,
-                    base_x=base_x_candidate,
-                    node_group=node_group_candidate,
-                    mc_samples=mc_samples,
+                finite_candidate_indices = torch.nonzero(
+                    finite_candidate_mask,
+                    as_tuple=False,
+                ).view(-1)
+
+                n_candidate_select = min(
+                    fantasy_topk_candidates,
+                    finite_candidate_indices.numel(),
                 )
 
-                fantasy_gain = _score_candidate_group_by_fantasy_gain(
-                    problem=problem,
-                    predictor=predictor,
-                    state=state,
-                    base_x=base_x_candidate,
-                    eval_x=eval_x_candidate,
-                    node_group=node_group_candidate,
-                    current_holdout_loss=current_holdout_loss,
-                    selector_holdout_X=selector_holdout_X,
-                    selector_holdout_y=selector_holdout_y,
-                    options=options,
-                )
+                shortlisted_candidate_positions = torch.topk(
+                    per_group_proxy_scores[finite_candidate_indices],
+                    k=n_candidate_select,
+                ).indices
 
-                fantasy_scores[cand_idx_candidate, group_idx_candidate] = (
-                    fantasy_gain / cost_tensor[0, group_idx_candidate]
-                )
+                shortlisted_candidate_indices = finite_candidate_indices[
+                    shortlisted_candidate_positions
+                ].tolist()
 
-    if torch.isfinite(fantasy_scores).any():
-        masked_scores = fantasy_scores
-        selection_mode = "partial_group_fantasy_gain"
+                node_group_candidate = list(node_groups[group_idx_candidate])
+
+                for cand_idx_candidate in shortlisted_candidate_indices:
+                    base_x_candidate = Xcand[cand_idx_candidate : cand_idx_candidate + 1]
+
+                    eval_x_candidate = build_eval_input_for_node_group(
+                        predictor=predictor,
+                        base_x=base_x_candidate,
+                        node_group=node_group_candidate,
+                        mc_samples=mc_samples,
+                        options=options,
+                    )
+
+                    fantasy_gain = _score_candidate_group_by_fantasy_gain(
+                        problem=problem,
+                        predictor=predictor,
+                        state=state,
+                        base_x=base_x_candidate,
+                        eval_x=eval_x_candidate,
+                        node_group=node_group_candidate,
+                        current_holdout_loss=current_holdout_loss,
+                        selector_holdout_X=selector_holdout_X,
+                        selector_holdout_y=selector_holdout_y,
+                        options=options,
+                    )
+
+                    fantasy_scores[cand_idx_candidate, group_idx_candidate] = (
+                        fantasy_gain / cost_tensor[0, group_idx_candidate]
+                    )
+
+        if torch.isfinite(fantasy_scores).any():
+            masked_scores = fantasy_scores
+            selection_mode = "partial_group_fantasy_gain"
+        else:
+            masked_scores = masked_proxy_scores
+            selection_mode = "partial_group_uq_fallback"
+
     else:
-        masked_scores = masked_proxy_scores
-        selection_mode = "partial_group_uq_fallback"
+        raise ValueError(
+            f"Unsupported selector_objective: {selector_objective}. "
+            "Use 'uncertainty' or 'fantasy_gain'."
+        )
 
     cand_idx, group_idx, best_score = select_top_cost_aware_action(masked_scores)
     base_x = Xcand[cand_idx : cand_idx + 1]
@@ -457,6 +507,7 @@ def get_suggested_node_and_input(
         base_x=base_x,
         node_group=new_node,
         mc_samples=mc_samples,
+        options=options,
     )
 
     best_group_scores = _best_group_scores(masked_scores)
@@ -482,7 +533,8 @@ def get_suggested_node_and_input(
             )
         logger.info(
             f"[selector] selection_mode={selection_mode}, "
-            f"current_holdout_loss={current_holdout_loss:.6f}, "
+            f"current_holdout_loss="
+            f"{'N/A' if current_holdout_loss is None else f'{current_holdout_loss:.6f}'}, "
             f"selected_group_idx={group_idx}, selected_node_group={new_node}, "
             f"selected_candidate_idx={cand_idx}, selected_score={best_score:.6f}"
         )
@@ -498,7 +550,9 @@ def get_suggested_node_and_input(
         "selected_group_idx": group_idx,
         "selected_node_group": new_node,
         "selected_score": best_score,
-        "current_holdout_loss": float(current_holdout_loss),
+        "current_holdout_loss": (
+            None if current_holdout_loss is None else float(current_holdout_loss)
+        ),
         "stage_uncertainty": stage_uncertainty,
         "active_group_indices": list(active_group_indices),
         "affordable_group_indices": list(affordable_group_indices),
