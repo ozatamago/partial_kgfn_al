@@ -15,6 +15,11 @@ Modeling / saved metrics:
 - saves weighted node test losses
 - saves observed full node outputs
 
+Resume support:
+- if trial_<trial>.pt exists and --force_restart is not set,
+  resume from the saved state
+- DKL predictors are rehydrated from saved full evaluations
+
 Example:
     python -m partial_alfn.experiments.freesolv3_sink_only_runner \
         --trial 0 --algo NN_UQ --costs 1_3 --budget 300 \
@@ -26,7 +31,7 @@ import os
 import random
 import time
 from copy import deepcopy
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -36,7 +41,10 @@ from botorch.utils.sampling import draw_sobol_samples
 
 from partial_alfn.models.model_factory import build_predictor
 from partial_alfn.test_functions.freesolv3 import Freesolv3FunctionNetwork
-from partial_alfn.training.train_factory import train_predictor_partial_backend
+from partial_alfn.training.train_factory import (
+    build_nodewise_datasets_from_full_evals,
+    train_predictor_backend_from_full_evals,
+)
 from partial_alfn.uncertainty.base import (
     predict_mean_var_all_nodes,
     predict_sink_mean_var,
@@ -67,8 +75,8 @@ def make_test_set(problem, n_test: int = 512, seed: int = 0):
         .squeeze(-2)
     )
     with torch.no_grad():
-        Y_full = problem.evaluate(X)  # [N, n_nodes]
-        y_sink = Y_full[..., [-1]]    # [N, 1]
+        Y_full = problem.evaluate(X)   # [N, n_nodes]
+        y_sink = Y_full[..., [-1]]     # [N, 1]
     return X, Y_full, y_sink
 
 
@@ -161,86 +169,185 @@ def _build_backend_options(
     }
 
 
-def _build_nodewise_datasets_from_full_evals(
-    *,
-    problem,
-    base_X: torch.Tensor,
-    Y_full: torch.Tensor,
-) -> Tuple[Sequence[torch.Tensor], Sequence[torch.Tensor]]:
-    """
-    Convert full evaluations (base_X -> Y_full) into teacher-forced node-wise
-    datasets expected by train_predictor_partial_backend.
-
-    For node j:
-      X_j = concat(parent node outputs, active external inputs)
-      Y_j = observed node j output
-    """
-    if base_X.ndim != 2:
-        raise ValueError(f"base_X must be 2D, got {tuple(base_X.shape)}")
-    if Y_full.ndim != 2:
-        raise ValueError(f"Y_full must be 2D, got {tuple(Y_full.shape)}")
-    if base_X.shape[0] != Y_full.shape[0]:
-        raise ValueError(
-            f"base_X and Y_full must have the same number of rows, got "
-            f"{base_X.shape[0]} and {Y_full.shape[0]}"
-        )
-    if Y_full.shape[1] != int(problem.n_nodes):
-        raise ValueError(
-            f"Y_full second dimension must equal problem.n_nodes={problem.n_nodes}, "
-            f"got {Y_full.shape[1]}"
-        )
-
-    train_X_nodes = []
-    train_Y_nodes = []
-
-    for j in range(int(problem.n_nodes)):
-        parts = []
-
-        for p in problem.parent_nodes[j]:
-            parts.append(Y_full[:, [p]])
-
-        active_idx = list(problem.active_input_indices[j])
-        if len(active_idx) > 0:
-            parts.append(base_X[:, active_idx])
-
-        if len(parts) == 0:
-            raise ValueError(
-                f"Node {j} has neither parents nor active external inputs."
-            )
-
-        xj = torch.cat(parts, dim=-1)
-        yj = Y_full[:, [j]]
-
-        train_X_nodes.append(xj)
-        train_Y_nodes.append(yj)
-
-    return train_X_nodes, train_Y_nodes
+def _is_dkl_predictor(predictor: torch.nn.Module) -> bool:
+    return str(getattr(predictor, "predictor_type", "")).lower() == "dkl"
 
 
-def train_backend_predictor(
+def _make_results_dir(problem_name: str, problem, algo: str, predictor_type: str, acquisition_mode: str) -> str:
+    results_dir = (
+        f"./results_sink_only/"
+        f"{problem_name}_{'_'.join(str(x) for x in problem.node_costs)}/"
+        f"{algo}_{str(predictor_type).lower()}_{acquisition_mode}/"
+    )
+    os.makedirs(results_dir, exist_ok=True)
+    return results_dir
+
+
+def _rehydrate_dkl_predictor_from_full_evals(
     *,
     predictor: torch.nn.Module,
     problem,
     train_X: torch.Tensor,
     train_Y_full: torch.Tensor,
-    backend_options: Dict,
-    optimizer=None,
-    verbose: bool = False,
-):
-    train_X_nodes, train_Y_nodes = _build_nodewise_datasets_from_full_evals(
+) -> None:
+    if not _is_dkl_predictor(predictor):
+        return
+
+    train_X_nodes, train_Y_nodes = build_nodewise_datasets_from_full_evals(
         problem=problem,
         base_X=train_X,
         Y_full=train_Y_full,
     )
-    return train_predictor_partial_backend(
+
+    if hasattr(predictor, "rehydrate_from_node_datasets"):
+        predictor.rehydrate_from_node_datasets(
+            train_X_nodes=train_X_nodes,
+            train_Y_nodes=train_Y_nodes,
+            strict=False,
+        )
+    else:
+        for j, (xj, yj) in enumerate(zip(train_X_nodes, train_Y_nodes)):
+            if xj is None or yj is None:
+                continue
+            if xj.shape[0] == 0:
+                continue
+            predictor.set_node_train_data(
+                node_idx=j,
+                x=xj,
+                y=yj,
+                strict=False,
+            )
+
+    predictor.eval()
+
+
+def _save_result_state(
+    *,
+    results_dir: str,
+    trial: int,
+    budget: int,
+    problem_name: str,
+    problem,
+    algo: str,
+    predictor_type: str,
+    acquisition_mode: str,
+    hidden: int,
+    p_drop: float,
+    mc_samples: int,
+    dkl_feature_dim: int,
+    dkl_kernel: str,
+    state: Dict[str, Any],
+) -> None:
+    payload = {
+        "bo_budget": budget,
+        "problem_name": problem_name,
+        "node_costs": list(problem.node_costs),
+        "algo": algo,
+        "predictor_type": str(predictor_type).lower(),
+        "acquisition_mode": acquisition_mode,
+        "hidden": hidden,
+        "p_drop": p_drop,
+        "mc_samples": mc_samples,
+        "dkl_feature_dim": dkl_feature_dim,
+        "dkl_kernel": dkl_kernel,
+        "cumulative_costs": state["cumulative_costs"],
+        "test_losses": state["test_losses"],
+        "best_test_loss": state["best_test_loss"],
+        "selected_inputs": state["selected_inputs"],
+        "selected_scores": state["selected_scores"],
+        "observed_sink_vals": state["observed_sink_vals"],
+        "observed_full_node_vals": state["observed_full_node_vals"],
+        "train_X": state["train_X"],
+        "train_y": state["train_y"],
+        "train_Y_full": state["train_Y_full"],
+        "node_test_losses_tf": state["node_test_losses_tf"],
+        "weighted_node_test_losses_tf_all": state["weighted_node_test_losses_tf_all"],
+        "weighted_node_test_losses_tf_intermediate": state["weighted_node_test_losses_tf_intermediate"],
+        "node_eval_counts": state["node_eval_counts"],
+        "predictor_state_dict": state["predictor"].state_dict(),
+        "mcd_optimizer_state": (
+            state["optimizer_state"].state_dict()
+            if isinstance(state["optimizer_state"], torch.optim.Optimizer)
+            else None
+        ),
+        "dkl_optimizer_state": (
+            state["optimizer_state"]
+            if isinstance(state["optimizer_state"], dict)
+            else None
+        ),
+        "random_states": {
+            "torch": torch.get_rng_state(),
+            "numpy": np.random.get_state(),
+            "random": random.getstate(),
+        },
+    }
+    torch.save(payload, os.path.join(results_dir, f"trial_{trial}.pt"))
+
+
+def _resume_experiment(
+    *,
+    results_dir: str,
+    trial: int,
+    predictor: torch.nn.Module,
+    problem,
+    backend_options: Dict,
+) -> Dict[str, Any]:
+    res = torch.load(os.path.join(results_dir, f"trial_{trial}.pt"), weights_only=False)
+
+    if "random_states" in res:
+        torch.set_rng_state(res["random_states"]["torch"])
+        np.random.set_state(res["random_states"]["numpy"])
+        random.setstate(res["random_states"]["random"])
+
+    predictor.load_state_dict(res["predictor_state_dict"])
+
+    optimizer_state: Any = None
+    if _is_dkl_predictor(predictor):
+        optimizer_state = res.get("dkl_optimizer_state", None)
+    else:
+        opt = torch.optim.Adam(
+            predictor.parameters(),
+            lr=float(backend_options.get("lr", 1e-3)),
+            weight_decay=float(backend_options.get("weight_decay", 1e-6)),
+        )
+        saved_opt = res.get("mcd_optimizer_state", None)
+        if saved_opt is not None:
+            opt.load_state_dict(saved_opt)
+        optimizer_state = opt
+
+    train_X = res["train_X"]
+    train_Y_full = res["train_Y_full"]
+    train_y = res.get("train_y", train_Y_full[..., [-1]])
+
+    _rehydrate_dkl_predictor_from_full_evals(
         predictor=predictor,
-        train_X_nodes=train_X_nodes,
-        train_Y_nodes=train_Y_nodes,
-        options=backend_options,
-        sink_idx=problem.n_nodes - 1,
-        optimizer=optimizer,
-        verbose=verbose,
+        problem=problem,
+        train_X=train_X,
+        train_Y_full=train_Y_full,
     )
+
+    cumulative_costs = res["cumulative_costs"]
+    total_cost = float(cumulative_costs[-1]) if len(cumulative_costs) > 0 else 0.0
+
+    return {
+        "predictor": predictor,
+        "optimizer_state": optimizer_state,
+        "train_X": train_X,
+        "train_Y_full": train_Y_full,
+        "train_y": train_y,
+        "test_losses": res["test_losses"],
+        "best_test_loss": res["best_test_loss"],
+        "node_test_losses_tf": res.get("node_test_losses_tf", {}),
+        "weighted_node_test_losses_tf_all": res.get("weighted_node_test_losses_tf_all", {}),
+        "weighted_node_test_losses_tf_intermediate": res.get("weighted_node_test_losses_tf_intermediate", {}),
+        "cumulative_costs": cumulative_costs,
+        "selected_inputs": res["selected_inputs"],
+        "selected_scores": res["selected_scores"],
+        "observed_sink_vals": res["observed_sink_vals"],
+        "observed_full_node_vals": res["observed_full_node_vals"],
+        "node_eval_counts": res["node_eval_counts"],
+        "total_cost": total_cost,
+    }
 
 
 def score_candidate_by_fantasy_gain(
@@ -279,12 +386,13 @@ def score_candidate_by_fantasy_gain(
     fantasy_options = dict(backend_options)
     fantasy_options["n_steps"] = int(fantasy_train_steps)
 
-    train_backend_predictor(
+    _ = train_predictor_backend_from_full_evals(
         predictor=fantasy_predictor,
         problem=problem,
-        train_X=fantasy_train_X,
-        train_Y_full=fantasy_train_Y_full,
-        backend_options=fantasy_options,
+        base_X=fantasy_train_X,
+        Y_full=fantasy_train_Y_full,
+        options=fantasy_options,
+        sink_idx=problem.n_nodes - 1,
         optimizer=None,
         verbose=False,
     )
@@ -454,6 +562,7 @@ def run_one_trial(
     acquisition_mode: str = "uncertainty",
     fantasy_topk_candidates: int = 8,
     fantasy_train_steps: int = 20,
+    force_restart: bool = False,
 ) -> None:
     if algo not in ["Random", "NN_UQ"]:
         raise ValueError(f"Unsupported algo: {algo}")
@@ -474,19 +583,12 @@ def run_one_trial(
         aux_loss_weight=1.0,
     )
 
-    results_dir = (
-        f"./results_sink_only/"
-        f"{problem_name}_{'_'.join(str(x) for x in problem.node_costs)}/"
-        f"{algo}_{str(predictor_type).lower()}_{acquisition_mode}/"
-    )
-    os.makedirs(results_dir, exist_ok=True)
-
-    logger.info(
-        f"============================Start Sink-Only Experiment=================================\n"
-        f"Experiment: {problem_name}_{'_'.join(str(x) for x in problem.node_costs)}\n"
-        f"Algorithm: {algo}\n"
-        f"Predictor: {predictor_type}\n"
-        f"Trial: {trial}"
+    results_dir = _make_results_dir(
+        problem_name=problem_name,
+        problem=problem,
+        algo=algo,
+        predictor_type=predictor_type,
+        acquisition_mode=acquisition_mode,
     )
 
     torch.manual_seed(trial)
@@ -507,65 +609,128 @@ def run_one_trial(
         seed=trial + 12345,
     )
 
-    # Initial design
-    n_init_evals = 2 * problem.dim + 1
-    init_X = (
-        draw_sobol_samples(
-            bounds=torch.tensor(problem.bounds, **tkwargs),
-            n=n_init_evals,
-            q=1,
+    result_path = os.path.join(results_dir, f"trial_{trial}.pt")
+
+    if os.path.exists(result_path) and not force_restart:
+        logger.info(
+            f"============================Resume Sink-Only Experiment=================================\n"
+            f"Experiment: {problem_name}_{'_'.join(str(x) for x in problem.node_costs)}\n"
+            f"Algorithm: {algo}\n"
+            f"Predictor: {predictor_type}\n"
+            f"Trial: {trial}"
         )
-        .squeeze(-2)
-        .to(**tkwargs)
-    )
 
-    init_Y_full = problem.evaluate(init_X)
-    if noisy:
-        init_Y_full = init_Y_full + torch.normal(0, 1, size=init_Y_full.shape)
+        state = _resume_experiment(
+            results_dir=results_dir,
+            trial=trial,
+            predictor=predictor,
+            problem=problem,
+            backend_options=backend_options,
+        )
+    else:
+        logger.info(
+            f"============================Start Sink-Only Experiment=================================\n"
+            f"Experiment: {problem_name}_{'_'.join(str(x) for x in problem.node_costs)}\n"
+            f"Algorithm: {algo}\n"
+            f"Predictor: {predictor_type}\n"
+            f"Trial: {trial}"
+        )
 
-    train_X = init_X.clone()
-    train_Y_full = init_Y_full.clone()
-    train_y_sink = init_Y_full[..., [-1]].clone()
+        n_init_evals = 2 * problem.dim + 1
+        init_X = (
+            draw_sobol_samples(
+                bounds=torch.tensor(problem.bounds, **tkwargs),
+                n=n_init_evals,
+                q=1,
+            )
+            .squeeze(-2)
+            .to(**tkwargs)
+        )
 
-    optimizer_state = train_backend_predictor(
-        predictor=predictor,
-        problem=problem,
-        train_X=train_X,
-        train_Y_full=train_Y_full,
-        backend_options=backend_options,
-        optimizer=None,
-        verbose=False,
-    )
+        init_Y_full = problem.evaluate(init_X)
+        if noisy:
+            init_Y_full = init_Y_full + torch.normal(0, 1, size=init_Y_full.shape)
 
-    test_loss = compute_sink_test_loss(
-        predictor=predictor,
-        test_X=test_X,
-        test_y_sink=test_y_sink,
-    )
-    best_test_loss = test_loss
-    logger.info(f"Initial sink test loss: {test_loss:.6f}")
+        train_X = init_X.clone()
+        train_Y_full = init_Y_full.clone()
+        train_y = init_Y_full[..., [-1]].clone()
 
-    initial_node_losses = compute_teacher_forced_node_losses(
-        predictor=predictor,
-        test_X=test_X,
-        test_Y_full=test_Y_full,
-    )
+        optimizer_state = train_predictor_backend_from_full_evals(
+            predictor=predictor,
+            problem=problem,
+            base_X=train_X,
+            Y_full=train_Y_full,
+            options=backend_options,
+            sink_idx=problem.n_nodes - 1,
+            optimizer=None,
+            verbose=False,
+        )
 
-    node_test_losses_tf = init_node_metric_history(initial_node_losses)
-    weighted_node_test_losses_tf_all = {-1: [compute_weighted_node_loss(initial_node_losses)]}
-    weighted_node_test_losses_tf_intermediate = {
-        -1: [compute_weighted_node_loss(initial_node_losses, exclude_nodes=[problem.n_nodes - 1])]
-    }
+        test_loss = compute_sink_test_loss(
+            predictor=predictor,
+            test_X=test_X,
+            test_y_sink=test_y_sink,
+        )
+        best_test_loss = test_loss
+        logger.info(f"Initial sink test loss: {test_loss:.6f}")
 
-    total_cost = 0.0
+        initial_node_losses = compute_teacher_forced_node_losses(
+            predictor=predictor,
+            test_X=test_X,
+            test_Y_full=test_Y_full,
+        )
+
+        state = {
+            "predictor": predictor,
+            "optimizer_state": optimizer_state,
+            "train_X": train_X,
+            "train_Y_full": train_Y_full,
+            "train_y": train_y,
+            "test_losses": [test_loss],
+            "best_test_loss": best_test_loss,
+            "node_test_losses_tf": init_node_metric_history(initial_node_losses),
+            "weighted_node_test_losses_tf_all": {
+                -1: [compute_weighted_node_loss(initial_node_losses)]
+            },
+            "weighted_node_test_losses_tf_intermediate": {
+                -1: [
+                    compute_weighted_node_loss(
+                        initial_node_losses,
+                        exclude_nodes=[problem.n_nodes - 1],
+                    )
+                ]
+            },
+            "cumulative_costs": [0.0],
+            "selected_inputs": [None],
+            "selected_scores": [None],
+            "observed_sink_vals": [None],
+            "observed_full_node_vals": [None],
+            "node_eval_counts": torch.zeros(problem.n_nodes, dtype=torch.long),
+            "total_cost": 0.0,
+        }
+
+        _save_result_state(
+            results_dir=results_dir,
+            trial=trial,
+            budget=budget,
+            problem_name=problem_name,
+            problem=problem,
+            algo=algo,
+            predictor_type=predictor_type,
+            acquisition_mode=acquisition_mode,
+            hidden=hidden,
+            p_drop=p_drop,
+            mc_samples=mc_samples,
+            dkl_feature_dim=dkl_feature_dim,
+            dkl_kernel=dkl_kernel,
+            state=state,
+        )
+
+    predictor = state["predictor"]
+    optimizer_state = state["optimizer_state"]
+
+    total_cost = float(state["total_cost"])
     full_eval_cost = float(sum(problem.node_costs))
-
-    cumulative_costs = [0.0]
-    test_losses = [test_loss]
-    selected_inputs = [None]
-    selected_scores = [None]
-    observed_sink_vals = [None]
-    observed_full_node_vals = [None]
 
     while total_cost < float(budget):
         remaining_budget = float(budget) - total_cost
@@ -581,8 +746,8 @@ def run_one_trial(
             problem=problem,
             predictor=predictor,
             backend_options=backend_options,
-            train_X=train_X,
-            train_Y_full=train_Y_full,
+            train_X=state["train_X"],
+            train_Y_full=state["train_Y_full"],
             acquisition_mode=acquisition_mode,
             selector_holdout_X=val_X,
             selector_holdout_y_sink=val_y_sink,
@@ -611,83 +776,83 @@ def run_one_trial(
         )
 
         total_cost += full_eval_cost
+        state["total_cost"] = total_cost
 
-        train_X = torch.cat((train_X, base_x), dim=0)
-        train_Y_full = torch.cat((train_Y_full, y_full), dim=0)
-        train_y_sink = torch.cat((train_y_sink, y_sink), dim=0)
+        state["train_X"] = torch.cat((state["train_X"], base_x), dim=0)
+        state["train_Y_full"] = torch.cat((state["train_Y_full"], y_full), dim=0)
+        state["train_y"] = torch.cat((state["train_y"], y_sink), dim=0)
 
-        optimizer_state = train_backend_predictor(
+        optimizer_state = train_predictor_backend_from_full_evals(
             predictor=predictor,
             problem=problem,
-            train_X=train_X,
-            train_Y_full=train_Y_full,
-            backend_options=backend_options,
+            base_X=state["train_X"],
+            Y_full=state["train_Y_full"],
+            options=backend_options,
+            sink_idx=problem.n_nodes - 1,
             optimizer=optimizer_state,
             verbose=False,
         )
+        state["optimizer_state"] = optimizer_state
 
         test_loss = compute_sink_test_loss(
             predictor=predictor,
             test_X=test_X,
             test_y_sink=test_y_sink,
         )
-        best_test_loss = min(best_test_loss, test_loss)
+        state["test_losses"].append(test_loss)
+        state["best_test_loss"] = min(state["best_test_loss"], test_loss)
 
         node_losses = compute_teacher_forced_node_losses(
             predictor=predictor,
             test_X=test_X,
             test_Y_full=test_Y_full,
         )
-        node_test_losses_tf = append_node_metric_history(node_test_losses_tf, node_losses)
-        weighted_node_test_losses_tf_all[-1].append(
-            compute_weighted_node_loss(node_losses)
+        state["node_test_losses_tf"] = append_node_metric_history(
+            state.get("node_test_losses_tf", {}),
+            node_losses,
         )
-        weighted_node_test_losses_tf_intermediate[-1].append(
-            compute_weighted_node_loss(node_losses, exclude_nodes=[problem.n_nodes - 1])
+        state["weighted_node_test_losses_tf_all"] = append_node_metric_history(
+            state.get("weighted_node_test_losses_tf_all", {}),
+            {-1: compute_weighted_node_loss(node_losses)},
+        )
+        state["weighted_node_test_losses_tf_intermediate"] = append_node_metric_history(
+            state.get("weighted_node_test_losses_tf_intermediate", {}),
+            {
+                -1: compute_weighted_node_loss(
+                    node_losses,
+                    exclude_nodes=[problem.n_nodes - 1],
+                )
+            },
         )
 
         tf_str = ", ".join([f"node{j}={v:.4f}" for j, v in sorted(node_losses.items())])
         logger.info(f"Teacher-forced node losses: {tf_str}")
-        logger.info(f"Sink test loss: {test_loss:.6f} (best {best_test_loss:.6f})")
+        logger.info(f"Sink test loss: {test_loss:.6f} (best {state['best_test_loss']:.6f})")
         logger.info(f"total cost used: {total_cost}")
         logger.info("==========================================================================")
 
-        cumulative_costs.append(total_cost)
-        test_losses.append(test_loss)
-        selected_inputs.append(base_x.detach().cpu())
-        selected_scores.append(score)
-        observed_sink_vals.append(y_sink.detach().cpu())
-        observed_full_node_vals.append(y_full.detach().cpu())
+        state["cumulative_costs"].append(total_cost)
+        state["selected_inputs"].append(base_x.detach().cpu())
+        state["selected_scores"].append(score)
+        state["observed_sink_vals"].append(y_sink.detach().cpu())
+        state["observed_full_node_vals"].append(y_full.detach().cpu())
+        state["node_eval_counts"] = state["node_eval_counts"] + 1
 
-        torch.save(
-            {
-                "bo_budget": budget,
-                "predictor_type": str(predictor_type).lower(),
-                "hidden": hidden,
-                "p_drop": p_drop,
-                "mc_samples": mc_samples,
-                "dkl_feature_dim": dkl_feature_dim,
-                "dkl_kernel": dkl_kernel,
-                "acquisition_mode": acquisition_mode,
-                "cumulative_costs": cumulative_costs,
-                "test_losses": test_losses,
-                "best_test_loss": best_test_loss,
-                "selected_inputs": selected_inputs,
-                "selected_scores": selected_scores,
-                "observed_sink_vals": observed_sink_vals,
-                "observed_full_node_vals": observed_full_node_vals,
-                "train_X": train_X,
-                "train_y": train_y_sink,
-                "train_Y_full": train_Y_full,
-                "node_test_losses_tf": node_test_losses_tf,
-                "weighted_node_test_losses_tf_all": weighted_node_test_losses_tf_all,
-                "weighted_node_test_losses_tf_intermediate": weighted_node_test_losses_tf_intermediate,
-                "node_eval_counts": torch.tensor(
-                    [float(len(cumulative_costs) - 1)] * problem.n_nodes,
-                    dtype=torch.float64,
-                ),
-            },
-            os.path.join(results_dir, f"trial_{trial}.pt"),
+        _save_result_state(
+            results_dir=results_dir,
+            trial=trial,
+            budget=budget,
+            problem_name=problem_name,
+            problem=problem,
+            algo=algo,
+            predictor_type=predictor_type,
+            acquisition_mode=acquisition_mode,
+            hidden=hidden,
+            p_drop=p_drop,
+            mc_samples=mc_samples,
+            dkl_feature_dim=dkl_feature_dim,
+            dkl_kernel=dkl_kernel,
+            state=state,
         )
 
 
@@ -706,6 +871,7 @@ def parse():
     parser.add_argument("--costs", "-c", type=str, required=True)
     parser.add_argument("--budget", "-b", type=int, default=200)
     parser.add_argument("--noisy", action="store_true")
+    parser.add_argument("--force_restart", action="store_true")
 
     parser.add_argument(
         "--predictor_type",
@@ -750,6 +916,7 @@ def main(
     acquisition_mode: str = "uncertainty",
     fantasy_topk_candidates: int = 8,
     fantasy_train_steps: int = 20,
+    force_restart: bool = False,
 ) -> None:
     cost_options = {
         "1_1": [1, 1],
@@ -780,6 +947,7 @@ def main(
         acquisition_mode=acquisition_mode,
         fantasy_topk_candidates=fantasy_topk_candidates,
         fantasy_train_steps=fantasy_train_steps,
+        force_restart=force_restart,
     )
 
 

@@ -64,9 +64,6 @@ def build_nodewise_datasets_from_full_evals(
     For node j:
       X_j = concat(parent node outputs, active external inputs)
       Y_j = observed node j output
-
-    This matches the training API expected by
-    train_predictor_partial(...) and train_predictor_partial_dkl(...).
     """
     _validate_problem_for_full_eval_conversion(problem)
 
