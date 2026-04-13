@@ -16,8 +16,7 @@ except ImportError as e:
 
 class _NodeFeatureExtractor(nn.Module):
     """
-    Per-node feature extractor:
-        x_node -> phi_node
+    Per-node feature extractor: x_node -> phi_node
     """
 
     def __init__(
@@ -67,7 +66,6 @@ class _NodeExactDKLGP(gpytorch.models.ExactGP):
         kernel_type: str = "rbf",
     ):
         super().__init__(train_x, train_y, likelihood)
-
         self.feature_extractor = feature_extractor
         self.feature_dim = int(feature_dim)
         self.kernel_type = kernel_type.lower()
@@ -100,13 +98,12 @@ class _NodeExactDKLGP(gpytorch.models.ExactGP):
 
 class NodewiseDKLRegressor(nn.Module):
     """
-    One DKL regressor for one node:
-        x_node -> z_node
+    One DKL regressor for one node: x_node -> z_node
 
     This wraps:
-        - feature extractor
-        - Gaussian likelihood
-        - Exact GP head
+    - feature extractor
+    - Gaussian likelihood
+    - Exact GP head
 
     Notes
     -----
@@ -126,7 +123,6 @@ class NodewiseDKLRegressor(nn.Module):
         noise_constraint: Optional[gpytorch.constraints.Interval] = None,
     ):
         super().__init__()
-
         self.in_dim = int(in_dim)
         self.hidden = int(hidden)
         self.feature_dim = int(feature_dim)
@@ -158,6 +154,10 @@ class NodewiseDKLRegressor(nn.Module):
         )
 
         self._has_real_train_data = False
+
+    @property
+    def has_real_train_data(self) -> bool:
+        return bool(self._has_real_train_data)
 
     def set_train_data(
         self,
@@ -200,8 +200,7 @@ class NodewiseDKLRegressor(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Backward-compatible default:
-        return posterior mean with shape [N, 1]
+        Backward-compatible default: return posterior mean with shape [N, 1]
         """
         mean, _ = self.predict_mean_var(x)
         return mean
@@ -225,9 +224,9 @@ class NodewiseDKLRegressor(nn.Module):
 
         with gpytorch.settings.fast_pred_var():
             posterior = self.gp(x)
+            mean = posterior.mean.unsqueeze(-1)
+            var = posterior.variance.unsqueeze(-1)
 
-        mean = posterior.mean.unsqueeze(-1)
-        var = posterior.variance.unsqueeze(-1)
         return mean, var
 
     @torch.no_grad()
@@ -302,7 +301,7 @@ class MultiHeadNodewiseDKL(nn.Module):
 
     Example for a 2-node chain:
         node 0: x_ext (dim 3) -> z0
-        node 1: z0 (dim 1)    -> z1
+        node 1: z0 (dim 1) -> z1
     """
 
     def __init__(
@@ -342,7 +341,9 @@ class MultiHeadNodewiseDKL(nn.Module):
             )
 
         self.parent_nodes = (
-            [list(p) for p in parent_nodes] if parent_nodes is not None else None
+            [list(p) for p in parent_nodes]
+            if parent_nodes is not None
+            else None
         )
         self.active_input_indices = (
             [list(a) for a in active_input_indices]
@@ -379,7 +380,9 @@ class MultiHeadNodewiseDKL(nn.Module):
 
         if self.parent_nodes is not None and self.active_input_indices is not None:
             for j in range(self.n_nodes):
-                implied_dim = len(self.parent_nodes[j]) + len(self.active_input_indices[j])
+                implied_dim = (
+                    len(self.parent_nodes[j]) + len(self.active_input_indices[j])
+                )
                 if implied_dim != self.node_input_dims[j]:
                     raise ValueError(
                         f"Node {j}: node_input_dims[{j}]={self.node_input_dims[j]} "
@@ -398,6 +401,49 @@ class MultiHeadNodewiseDKL(nn.Module):
                 f"node_idx must be in [0, {self.n_nodes - 1}], got {node_idx}"
             )
         self.node_models[node_idx].set_train_data(x=x, y=y, strict=strict)
+
+    def node_has_real_train_data(
+        self,
+        node_idx: int,
+    ) -> bool:
+        if not (0 <= node_idx < self.n_nodes):
+            raise IndexError(
+                f"node_idx must be in [0, {self.n_nodes - 1}], got {node_idx}"
+            )
+        return bool(self.node_models[node_idx].has_real_train_data)
+
+    def rehydrate_from_node_datasets(
+        self,
+        train_X_nodes: Sequence[torch.Tensor],
+        train_Y_nodes: Sequence[torch.Tensor],
+        strict: bool = False,
+    ) -> None:
+        if len(train_X_nodes) != self.n_nodes:
+            raise ValueError(
+                f"Expected {self.n_nodes} node datasets in train_X_nodes, "
+                f"got {len(train_X_nodes)}"
+            )
+        if len(train_Y_nodes) != self.n_nodes:
+            raise ValueError(
+                f"Expected {self.n_nodes} node datasets in train_Y_nodes, "
+                f"got {len(train_Y_nodes)}"
+            )
+
+        for j, (xj, yj) in enumerate(zip(train_X_nodes, train_Y_nodes)):
+            if xj is None or yj is None:
+                continue
+            if xj.ndim != 2:
+                raise ValueError(
+                    f"train_X_nodes[{j}] must be 2D, got {tuple(xj.shape)}"
+                )
+            if xj.shape[0] == 0:
+                continue
+            self.set_node_train_data(
+                node_idx=j,
+                x=xj,
+                y=yj,
+                strict=strict,
+            )
 
     def node_mll(
         self,
@@ -433,7 +479,9 @@ class MultiHeadNodewiseDKL(nn.Module):
         node_idx: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Returns latent posterior mean / variance of node_idx from node-input space.
+        Returns latent posterior mean / variance of node_idx
+        from node-input space.
+
         Shapes: [N, 1], [N, 1]
         """
         if not (0 <= node_idx < self.n_nodes):
@@ -454,7 +502,8 @@ class MultiHeadNodewiseDKL(nn.Module):
         - parent outputs
         - directly active external inputs from base_x
 
-        parent_outputs[p] is expected to be shape [N, 1] for parent node p.
+        parent_outputs[p] is expected to be shape [N, 1]
+        for parent node p.
         """
         if self.parent_nodes is None or self.active_input_indices is None:
             raise ValueError(
@@ -481,7 +530,8 @@ class MultiHeadNodewiseDKL(nn.Module):
                 )
             if yp.ndim != 2 or yp.shape[1] != 1:
                 raise ValueError(
-                    f"Parent output for node {p} must be [N,1], got {tuple(yp.shape)}"
+                    f"Parent output for node {p} must be [N,1], "
+                    f"got {tuple(yp.shape)}"
                 )
             parts.append(yp)
 
@@ -501,7 +551,6 @@ class MultiHeadNodewiseDKL(nn.Module):
                 f"Constructed input for node {node_idx} has dim {x_node.shape[1]}, "
                 f"expected {expected_dim}"
             )
-
         return x_node
 
     def rollout_means_from_base(
@@ -587,8 +636,8 @@ class MultiHeadNodewiseDKL(nn.Module):
         base_x: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Backward-compatible convenience:
-        returns all node mean predictions from external input base_x.
+        Backward-compatible convenience: returns all node mean predictions
+        from external input base_x.
         """
         return self.rollout_means_from_base(base_x)
 
@@ -610,7 +659,6 @@ class MultiHeadNodewiseDKL(nn.Module):
 
         If x is in external input space:
             compute sink prediction from base_x.
-
         If x is already in sink-input space:
             compute sink conditional model directly.
         """

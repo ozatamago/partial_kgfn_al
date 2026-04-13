@@ -19,6 +19,7 @@ def _get_predictor_type(predictor: nn.Module) -> str:
         raise AttributeError(
             "predictor must expose predictor_type, e.g. 'mcd' or 'dkl'"
         )
+
     predictor_type = str(predictor_type).lower()
     if predictor_type not in ["mcd", "dkl"]:
         raise ValueError(
@@ -37,11 +38,13 @@ def _validate_problem_for_full_eval_conversion(problem: Any) -> None:
             )
 
     n_nodes = int(problem.n_nodes)
+
     if len(problem.parent_nodes) != n_nodes:
         raise ValueError(
             f"len(problem.parent_nodes) must equal problem.n_nodes={n_nodes}, "
             f"got {len(problem.parent_nodes)}"
         )
+
     if len(problem.active_input_indices) != n_nodes:
         raise ValueError(
             f"len(problem.active_input_indices) must equal problem.n_nodes={n_nodes}, "
@@ -62,8 +65,8 @@ def build_nodewise_datasets_from_full_evals(
       X_j = concat(parent node outputs, active external inputs)
       Y_j = observed node j output
 
-    This matches the training API expected by train_predictor_partial(...) and
-    train_predictor_partial_dkl(...).
+    This matches the training API expected by
+    train_predictor_partial(...) and train_predictor_partial_dkl(...).
     """
     _validate_problem_for_full_eval_conversion(problem)
 
@@ -124,7 +127,7 @@ def train_predictor_partial_backend(
     options: Optional[Dict[str, Any]] = None,
     *,
     sink_idx: Optional[int] = None,
-    optimizer: Optional[torch.optim.Optimizer] = None,
+    optimizer: Optional[Any] = None,
     verbose: bool = False,
 ):
     """
@@ -153,16 +156,16 @@ def train_predictor_partial_backend(
     sink_idx:
         Optional explicit sink index. If None, use predictor.sink_idx when needed.
     optimizer:
-        For MCD backend, forwarded to the existing trainer.
-        For DKL backend, currently ignored by the DKL trainer.
+        - For MCD backend: torch.optim.Optimizer
+        - For DKL backend: optional dict containing per-node optimizer states
     verbose:
         Whether to print training diagnostics.
 
     Returns
     -------
     optimizer_or_state:
-        - For MCD: typically returns an optimizer
-        - For DKL: currently returns None
+        - For MCD: typically returns a torch optimizer
+        - For DKL: typically returns a dict containing per-node optimizer states
     """
     opts = _to_options_dict(options)
     predictor_type = _get_predictor_type(predictor)
@@ -218,7 +221,7 @@ def train_predictor_backend_from_full_evals(
     Y_full: torch.Tensor,
     options: Optional[Dict[str, Any]] = None,
     sink_idx: Optional[int] = None,
-    optimizer: Optional[torch.optim.Optimizer] = None,
+    optimizer: Optional[Any] = None,
     verbose: bool = False,
 ):
     """
@@ -227,7 +230,8 @@ def train_predictor_backend_from_full_evals(
     This converts:
         base_X  : [N, d]
         Y_full  : [N, n_nodes]
-    into node-wise conditional datasets, then calls train_predictor_partial_backend.
+    into node-wise conditional datasets, then calls
+    train_predictor_partial_backend(...).
     """
     train_X_nodes, train_Y_nodes = build_nodewise_datasets_from_full_evals(
         problem=problem,

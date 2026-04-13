@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from typing import Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -58,7 +58,7 @@ def _get_nonempty_nodes(
     train_X_nodes: Sequence[torch.Tensor],
     train_Y_nodes: Sequence[torch.Tensor],
 ) -> list[int]:
-    out = []
+    out: list[int] = []
     for j, (xj, yj) in enumerate(zip(train_X_nodes, train_Y_nodes)):
         yj_flat = _flatten_targets(yj)
         if xj.shape[0] != yj_flat.shape[0]:
@@ -93,6 +93,42 @@ def _validate_against_predictor_dims(
             )
 
 
+def _restore_node_optimizer_states(
+    *,
+    node_optimizers: Sequence[Optional[torch.optim.Optimizer]],
+    optimizer_state: Optional[Dict[str, Any]],
+) -> None:
+    if not isinstance(optimizer_state, dict):
+        return
+    if optimizer_state.get("kind", None) != "dkl_node_optimizers":
+        return
+
+    saved = optimizer_state.get("node_optimizers", None)
+    if not isinstance(saved, list):
+        return
+
+    for j, opt in enumerate(node_optimizers):
+        if opt is None:
+            continue
+        if j >= len(saved):
+            continue
+        if saved[j] is None:
+            continue
+        opt.load_state_dict(saved[j])
+
+
+def _dump_node_optimizer_states(
+    node_optimizers: Sequence[Optional[torch.optim.Optimizer]],
+) -> Dict[str, Any]:
+    return {
+        "kind": "dkl_node_optimizers",
+        "node_optimizers": [
+            None if opt is None else opt.state_dict()
+            for opt in node_optimizers
+        ],
+    }
+
+
 def train_predictor_partial_dkl(
     predictor: nn.Module,
     train_X_nodes: Sequence[torch.Tensor],
@@ -105,11 +141,11 @@ def train_predictor_partial_dkl(
     nodes_per_step: Optional[int] = None,
     aux_loss_weight: float = 1.0,
     sink_loss_weight: float = 1.0,
-    optimizer: Optional[torch.optim.Optimizer] = None,
+    optimizer: Optional[Dict[str, Any]] = None,
     verbose: bool = False,
-) -> Optional[torch.optim.Optimizer]:
+) -> Optional[Dict[str, Any]]:
     """
-    Train a node-wise DKL predictor using the same node-wise datasets as the MCD version.
+    Train a node-wise DKL predictor using node-wise datasets.
 
     Parameters
     ----------
@@ -141,14 +177,14 @@ def train_predictor_partial_dkl(
     sink_loss_weight:
         Weight for sink node.
     optimizer:
-        Ignored for now. Present only to keep a similar signature to the MCD trainer.
+        Optional dict containing per-node optimizer states from a previous run.
     verbose:
         If True, print loss diagnostics.
 
     Returns
     -------
-    optimizer:
-        Returns None for now. Each node uses its own Adam optimizer internally.
+    optimizer_state:
+        Dict containing per-node optimizer states.
     """
     _validate_node_datasets(train_X_nodes, train_Y_nodes)
 
@@ -186,11 +222,9 @@ def train_predictor_partial_dkl(
             f"sink_loss_weight must be non-negative, got {sink_loss_weight}"
         )
 
-    del optimizer  # not used; per-node optimizers are created below
-
     nonempty_nodes = _get_nonempty_nodes(train_X_nodes, train_Y_nodes)
     if len(nonempty_nodes) == 0:
-        return None
+        return optimizer
 
     # Load training data only into nodes that actually have observations.
     for j in nonempty_nodes:
@@ -204,7 +238,7 @@ def train_predictor_partial_dkl(
         )
 
     # Build one optimizer per node.
-    node_optimizers = [None] * n_nodes
+    node_optimizers: list[Optional[torch.optim.Optimizer]] = [None] * n_nodes
     for j in nonempty_nodes:
         params = list(predictor.node_models[j].parameters())
         node_optimizers[j] = torch.optim.Adam(
@@ -212,6 +246,11 @@ def train_predictor_partial_dkl(
             lr=lr,
             weight_decay=weight_decay,
         )
+
+    _restore_node_optimizer_states(
+        node_optimizers=node_optimizers,
+        optimizer_state=optimizer,
+    )
 
     for step in range(n_steps):
         if nodes_per_step is None or nodes_per_step >= len(nonempty_nodes):
@@ -234,6 +273,7 @@ def train_predictor_partial_dkl(
             gp_model.train()
             likelihood.train()
 
+            assert node_optimizers[j] is not None
             node_optimizers[j].zero_grad()
             gp_output = gp_model(xj)
             neg_mll = -mll(gp_output, yj)
@@ -257,4 +297,4 @@ def train_predictor_partial_dkl(
         predictor.node_models[j].gp.eval()
         predictor.node_models[j].likelihood.eval()
 
-    return None
+    return _dump_node_optimizer_states(node_optimizers)

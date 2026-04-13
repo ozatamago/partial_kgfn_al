@@ -10,12 +10,13 @@ Current version:
 - distinguishes:
     * base_x : external input in the original input space
     * eval_x : actual node-specific input passed to problem.evaluate(...)
+- supports DKL resume by rehydrating node-wise train data after checkpoint load
 """
 
 import os
 import random
 import time
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -53,6 +54,69 @@ tkwargs = {
     "dtype": torch.double,
     "device": torch.device("cpu"),
 }
+
+
+def _is_dkl_predictor(predictor: Any) -> bool:
+    return str(getattr(predictor, "predictor_type", "")).lower() == "dkl"
+
+
+def _is_torch_optimizer(x: Any) -> bool:
+    return isinstance(x, torch.optim.Optimizer)
+
+
+def _rehydrate_dkl_predictor_from_state(
+    *,
+    predictor: Any,
+    state: Dict[str, Any],
+) -> None:
+    """
+    Reattach node-wise real training data to a resumed DKL predictor.
+
+    Exact-GP style DKL predictors need their train data to be set on the model
+    object. Loading state_dict alone is not sufficient.
+    """
+    if not _is_dkl_predictor(predictor):
+        return
+
+    train_X_nodes = state.get("train_X", None)
+    train_Y_nodes = state.get("train_Y", None)
+
+    if train_X_nodes is None or train_Y_nodes is None:
+        raise ValueError(
+            "Resume state for a DKL predictor must contain train_X and train_Y."
+        )
+
+    if len(train_X_nodes) != int(predictor.n_nodes):
+        raise ValueError(
+            f"Expected {predictor.n_nodes} node datasets in train_X, "
+            f"got {len(train_X_nodes)}"
+        )
+    if len(train_Y_nodes) != int(predictor.n_nodes):
+        raise ValueError(
+            f"Expected {predictor.n_nodes} node datasets in train_Y, "
+            f"got {len(train_Y_nodes)}"
+        )
+
+    node_counts = []
+    for j, (xj, yj) in enumerate(zip(train_X_nodes, train_Y_nodes)):
+        n_j = 0 if xj is None else int(xj.shape[0])
+        node_counts.append((j, n_j))
+
+        if xj is None or yj is None:
+            continue
+        if xj.shape[0] == 0:
+            continue
+
+        predictor.set_node_train_data(
+            node_idx=j,
+            x=xj,
+            y=yj,
+            strict=False,
+        )
+
+    logger.info(f"[resume] rehydrated DKL node datasets: {node_counts}")
+    predictor.eval()
+
 
 def _prepare_test_artifacts(
     *,
@@ -121,6 +185,7 @@ def _prepare_selector_holdout(options: Dict) -> None:
     options.setdefault("fantasy_topk_candidates", 8)
     options.setdefault("fantasy_topk_groups", 2)
 
+
 def _compute_node_metric_snapshot(
     *,
     predictor,
@@ -182,9 +247,6 @@ def _initialize_new_experiment(
     test_X = options["test_X"]
     test_y = options["test_y"]
     task = options.get("task", "regression")
-    node_test_X = options["node_test_X"]
-    node_test_Y = options["node_test_Y"]
-    full_test_Y = options["full_test_Y"]
 
     torch.manual_seed(trial)
     np.random.seed(trial)
@@ -230,12 +292,15 @@ def _initialize_new_experiment(
         x=X,
         y_full=network_output_at_X,
     )
-    
-    nn_optimizer = torch.optim.Adam(
-        predictor.parameters(),
-        lr=options.get("nn_lr", 1e-3),
-        weight_decay=options.get("nn_weight_decay", 1e-6),
-    )
+
+    if _is_dkl_predictor(predictor):
+        nn_optimizer = None
+    else:
+        nn_optimizer = torch.optim.Adam(
+            predictor.parameters(),
+            lr=options.get("nn_lr", 1e-3),
+            weight_decay=options.get("nn_weight_decay", 1e-6),
+        )
 
     maybe_optimizer = train_predictor_partial_backend(
         predictor=predictor,
@@ -267,7 +332,7 @@ def _initialize_new_experiment(
     else:
         test_losses = []
         best_test_loss = float("inf")
-    
+
     initial_node_metrics = _compute_node_metric_snapshot(
         predictor=predictor,
         options=options,
@@ -296,6 +361,7 @@ def _initialize_new_experiment(
         "total_cost": 0.0,
         "predictor": predictor,
         "nn_optimizer": nn_optimizer,
+        "dkl_optimizer_state": nn_optimizer if _is_dkl_predictor(predictor) else None,
         "node_test_losses_tf": init_node_metric_history(initial_node_metrics["teacher_forced"]),
         "node_test_losses_rollout": init_node_metric_history(initial_node_metrics["rollout"]),
         "weighted_node_test_losses_tf_all": init_node_metric_history(initial_node_metrics["weighted_teacher_forced_all"]),
@@ -318,22 +384,37 @@ def _resume_experiment(
     random.setstate(res["random_states"]["random"])
 
     predictor = options["predictor"]
-    nn_optimizer = torch.optim.Adam(
-        predictor.parameters(),
-        lr=options.get("nn_lr", 1e-3),
-        weight_decay=options.get("nn_weight_decay", 1e-6),
-    )
 
-    _ = load_latest_nn_checkpoint(
-        results_dir=results_dir,
-        trial=trial,
-        predictor=predictor,
-        nn_optimizer=nn_optimizer,
-        map_location="cpu",
-    )
+    if _is_dkl_predictor(predictor):
+        nn_optimizer = res.get("dkl_optimizer_state", None)
+        _ = load_latest_nn_checkpoint(
+            results_dir=results_dir,
+            trial=trial,
+            predictor=predictor,
+            nn_optimizer=None,
+            map_location="cpu",
+        )
+    else:
+        nn_optimizer = torch.optim.Adam(
+            predictor.parameters(),
+            lr=options.get("nn_lr", 1e-3),
+            weight_decay=options.get("nn_weight_decay", 1e-6),
+        )
+        _ = load_latest_nn_checkpoint(
+            results_dir=results_dir,
+            trial=trial,
+            predictor=predictor,
+            nn_optimizer=nn_optimizer,
+            map_location="cpu",
+        )
 
     cumulative_costs = res["cumulative_costs"]
     total_cost = float(cumulative_costs[-1]) if len(cumulative_costs) > 0 else 0.0
+
+    _rehydrate_dkl_predictor_from_state(
+        predictor=predictor,
+        state=res,
+    )
 
     return {
         "train_X": res["train_X"],
@@ -356,6 +437,7 @@ def _resume_experiment(
         "total_cost": total_cost,
         "predictor": predictor,
         "nn_optimizer": nn_optimizer,
+        "dkl_optimizer_state": res.get("dkl_optimizer_state", None),
         "node_test_losses_tf": res.get("node_test_losses_tf", {}),
         "node_test_losses_rollout": res.get("node_test_losses_rollout", {}),
         "weighted_node_test_losses_tf_all": res.get("weighted_node_test_losses_tf_all", {}),
@@ -390,6 +472,7 @@ def _save_trial_state(
         "train_y_nn": state["train_y_nn"],
         "partial_buffers": state.get("partial_buffers", None),
         "network_output_at_X": state["network_output_at_X"],
+        "dkl_optimizer_state": state.get("dkl_optimizer_state", None),
         "random_states": {
             "torch": torch.get_rng_state(),
             "numpy": np.random.get_state(),
@@ -579,6 +662,10 @@ def run_one_trial(
             nn_optimizer = maybe_optimizer
 
         state["nn_optimizer"] = nn_optimizer
+        if _is_dkl_predictor(predictor):
+            state["dkl_optimizer_state"] = nn_optimizer
+        else:
+            state["dkl_optimizer_state"] = None
 
         if "obs_val" in metrics and state["train_y_nn"] is not None and state["train_y_nn"].shape[0] > 0:
             best_obs_val = float(state["train_y_nn"].max().item())
@@ -657,7 +744,7 @@ def run_one_trial(
             trial=trial,
             step=step,
             predictor=predictor,
-            nn_optimizer=nn_optimizer,
+            nn_optimizer=nn_optimizer if _is_torch_optimizer(nn_optimizer) else None,
             extra={
                 "total_cost": float(state["total_cost"]),
                 "budget": float(budget),
