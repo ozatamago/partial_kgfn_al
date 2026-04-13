@@ -41,7 +41,6 @@ def _validate_node_datasets(
             raise ValueError(
                 f"train_X_nodes[{j}] must be 2D, got shape {tuple(xj.shape)}"
             )
-
         if yj.ndim not in [1, 2]:
             raise ValueError(
                 f"train_Y_nodes[{j}] must be 1D or 2D, got shape {tuple(yj.shape)}"
@@ -52,6 +51,45 @@ def _validate_node_datasets(
             raise ValueError(
                 f"Node {j}: x and y must have the same number of rows, got "
                 f"{xj.shape[0]} and {yj_flat.shape[0]}"
+            )
+
+
+def _get_nonempty_nodes(
+    train_X_nodes: Sequence[torch.Tensor],
+    train_Y_nodes: Sequence[torch.Tensor],
+) -> list[int]:
+    out = []
+    for j, (xj, yj) in enumerate(zip(train_X_nodes, train_Y_nodes)):
+        yj_flat = _flatten_targets(yj)
+        if xj.shape[0] != yj_flat.shape[0]:
+            raise ValueError(
+                f"Node {j}: x and y must have the same number of rows, got "
+                f"{xj.shape[0]} and {yj_flat.shape[0]}"
+            )
+        if xj.shape[0] > 0:
+            out.append(j)
+    return out
+
+
+def _validate_against_predictor_dims(
+    predictor: nn.Module,
+    train_X_nodes: Sequence[torch.Tensor],
+) -> None:
+    if not hasattr(predictor, "node_input_dims"):
+        return
+
+    expected_dims = [int(d) for d in predictor.node_input_dims]
+    if len(expected_dims) != len(train_X_nodes):
+        raise ValueError(
+            f"predictor.node_input_dims has length {len(expected_dims)} but "
+            f"train_X_nodes has length {len(train_X_nodes)}"
+        )
+
+    for j, xj in enumerate(train_X_nodes):
+        if xj.shape[1] != expected_dims[j]:
+            raise ValueError(
+                f"Node {j}: train_X_nodes[{j}] has dim {xj.shape[1]}, "
+                f"but predictor expects {expected_dims[j]}"
             )
 
 
@@ -77,12 +115,12 @@ def train_predictor_partial_dkl(
     ----------
     predictor:
         Expected to expose:
-            - predictor.n_nodes
-            - predictor.sink_idx
-            - predictor.set_node_train_data(node_idx, x, y, strict=False)
-            - predictor.node_mll(node_idx) -> ExactMarginalLogLikelihood
-            - predictor.node_models[node_idx].gp
-            - predictor.node_models[node_idx].likelihood
+          - predictor.n_nodes
+          - predictor.sink_idx
+          - predictor.set_node_train_data(node_idx, x, y, strict=False)
+          - predictor.node_mll(node_idx) -> ExactMarginalLogLikelihood
+          - predictor.node_models[node_idx].gp
+          - predictor.node_models[node_idx].likelihood
     train_X_nodes:
         List of node-input tensors. train_X_nodes[j] has shape [Nj, dj].
     train_Y_nodes:
@@ -96,8 +134,8 @@ def train_predictor_partial_dkl(
     weight_decay:
         Weight decay for Adam.
     nodes_per_step:
-        If provided, sample at most this many nodes per outer step.
-        If None, update all nodes every step.
+        If provided, sample at most this many nonempty nodes per outer step.
+        If None, update all nonempty nodes every step.
     aux_loss_weight:
         Weight for non-sink nodes.
     sink_loss_weight:
@@ -111,7 +149,6 @@ def train_predictor_partial_dkl(
     -------
     optimizer:
         Returns None for now. Each node uses its own Adam optimizer internally.
-        This keeps the signature compatible with the existing runner pattern.
     """
     _validate_node_datasets(train_X_nodes, train_Y_nodes)
 
@@ -128,9 +165,9 @@ def train_predictor_partial_dkl(
 
     n_nodes = int(predictor.n_nodes)
     if len(train_X_nodes) != n_nodes:
-        raise ValueError(
-            f"Expected {n_nodes} node datasets, got {len(train_X_nodes)}"
-        )
+        raise ValueError(f"Expected {n_nodes} node datasets, got {len(train_X_nodes)}")
+
+    _validate_against_predictor_dims(predictor, train_X_nodes)
 
     sink_idx = predictor.sink_idx if sink_idx is None else int(sink_idx)
     if not (0 <= sink_idx < n_nodes):
@@ -151,8 +188,12 @@ def train_predictor_partial_dkl(
 
     del optimizer  # not used; per-node optimizers are created below
 
-    # Load training data into each node DKL model
-    for j in range(n_nodes):
+    nonempty_nodes = _get_nonempty_nodes(train_X_nodes, train_Y_nodes)
+    if len(nonempty_nodes) == 0:
+        return None
+
+    # Load training data only into nodes that actually have observations.
+    for j in nonempty_nodes:
         xj = train_X_nodes[j]
         yj = train_Y_nodes[j]
         predictor.set_node_train_data(
@@ -163,22 +204,21 @@ def train_predictor_partial_dkl(
         )
 
     # Build one optimizer per node.
-    node_optimizers = []
-    for j in range(n_nodes):
+    node_optimizers = [None] * n_nodes
+    for j in nonempty_nodes:
         params = list(predictor.node_models[j].parameters())
-        opt_j = torch.optim.Adam(
+        node_optimizers[j] = torch.optim.Adam(
             params,
             lr=lr,
             weight_decay=weight_decay,
         )
-        node_optimizers.append(opt_j)
 
     for step in range(n_steps):
-        if nodes_per_step is None or nodes_per_step >= n_nodes:
-            active_nodes = list(range(n_nodes))
+        if nodes_per_step is None or nodes_per_step >= len(nonempty_nodes):
+            active_nodes = list(nonempty_nodes)
         else:
-            perm = torch.randperm(n_nodes)
-            active_nodes = perm[:nodes_per_step].tolist()
+            perm = torch.randperm(len(nonempty_nodes))
+            active_nodes = [nonempty_nodes[i] for i in perm[:nodes_per_step].tolist()]
 
         total_objective_value = 0.0
 
@@ -195,13 +235,11 @@ def train_predictor_partial_dkl(
             likelihood.train()
 
             node_optimizers[j].zero_grad()
-
             gp_output = gp_model(xj)
             neg_mll = -mll(gp_output, yj)
 
             weight = sink_loss_weight if j == sink_idx else aux_loss_weight
             loss = weight * neg_mll
-
             loss.backward()
             node_optimizers[j].step()
 
@@ -215,7 +253,7 @@ def train_predictor_partial_dkl(
             )
 
     predictor.eval()
-    for j in range(n_nodes):
+    for j in nonempty_nodes:
         predictor.node_models[j].gp.eval()
         predictor.node_models[j].likelihood.eval()
 

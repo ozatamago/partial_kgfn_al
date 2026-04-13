@@ -12,16 +12,16 @@ from torch import Tensor
 from partial_alfn.data.update_buffers import append_partial_observation
 from partial_alfn.metrics.evaluation import compute_test_loss
 from partial_alfn.policies.candidates import make_candidates
-from partial_alfn.policies.node_input_builder import build_eval_input_for_node_group
+from partial_alfn.policies.node_input_builder import (
+    build_eval_input_for_node_group,
+    sample_fantasy_observation_for_node_group,
+)
 from partial_alfn.training.train_factory import train_predictor_partial_backend
 from partial_alfn.uncertainty.base import (
     predict_mean_var,
-    predict_mean_var_all_nodes,
+    predict_sink_mean_var,
 )
-from partial_alfn.uncertainty.mc_dropout import (
-    reduce_group_variances,
-    select_top_cost_aware_action,
-)
+from partial_alfn.uncertainty.mc_dropout import select_top_cost_aware_action
 from partial_alfn.utils.effective_costs import effective_group_costs
 
 def _default_node_groups(problem: SyntheticTestFunction) -> List[List[int]]:
@@ -122,6 +122,57 @@ def _clone_state_for_fantasy(state: Dict) -> Dict:
         "partial_buffers": None,
     }
 
+def _group_variance_from_base_candidates(
+    *,
+    predictor: nn.Module,
+    base_x: Tensor,
+    node_group: Sequence[int],
+    mc_samples: int,
+    options: Dict,
+) -> Tensor:
+    """
+    Compute a group-local uncertainty proxy without requiring all-node rollout.
+
+    Returns
+    -------
+    group_var: torch.Tensor
+        Shape [N]
+    """
+    uncertainty_options = _make_uncertainty_options(
+        options=options,
+        mc_samples=mc_samples,
+    )
+
+    eval_x = build_eval_input_for_node_group(
+        predictor=predictor,
+        base_x=base_x,
+        node_group=node_group,
+        mc_samples=mc_samples,
+        options=options,
+    )
+
+    per_node_vars = []
+    for node_idx in node_group:
+        _, var_j = predict_mean_var(
+            predictor=predictor,
+            X=eval_x,
+            node_idx=node_idx,
+            options=uncertainty_options,
+        )
+        per_node_vars.append(var_j)
+
+    var_group = torch.cat(per_node_vars, dim=-1)  # [N, |group|]
+    reduction = str(options.get("group_var_reduction", "sum")).lower()
+
+    if reduction == "sum":
+        return var_group.sum(dim=-1)
+    if reduction == "mean":
+        return var_group.mean(dim=-1)
+    if reduction == "max":
+        return var_group.max(dim=-1).values
+
+    raise ValueError(f"Unsupported group_var_reduction: {reduction}")
+
 
 def _score_candidate_group_by_fantasy_gain(
     *,
@@ -129,7 +180,6 @@ def _score_candidate_group_by_fantasy_gain(
     predictor: nn.Module,
     state: Dict,
     base_x: Tensor,
-    eval_x: Tensor,
     node_group: Sequence[int],
     current_holdout_loss: float,
     selector_holdout_X: Tensor,
@@ -140,26 +190,21 @@ def _score_candidate_group_by_fantasy_gain(
     fantasy_train_steps = int(options.get("fantasy_train_steps", 20))
     task = options.get("task", "regression")
 
-    uncertainty_options = _make_uncertainty_options(
-        options=options,
-        mc_samples=mc_samples,
-    )
-
     fantasy_predictor = deepcopy(predictor)
     fantasy_state = _clone_state_for_fantasy(state)
 
-    pred_mean_all, _ = predict_mean_var_all_nodes(
+    fantasy_eval_x, fantasy_y = sample_fantasy_observation_for_node_group(
         predictor=predictor,
-        X=base_x,
-        options=uncertainty_options,
+        base_x=base_x,
+        node_group=node_group,
+        mc_samples=mc_samples,
+        options=options,
     )
-
-    fantasy_y = pred_mean_all[:, list(node_group)]
 
     append_partial_observation(
         problem=problem,
         base_x=base_x,
-        eval_x=eval_x,
+        eval_x=fantasy_eval_x,
         new_y=fantasy_y,
         new_node=list(node_group),
         state=fantasy_state,
@@ -243,10 +288,9 @@ def get_suggested_node_and_input(
             mc_samples=mc_samples,
         )
 
-        _, pred_var = predict_mean_var(
+        _, pred_var = predict_sink_mean_var(
             predictor=predictor,
             X=Xcand,
-            node_idx=None,
             options=uncertainty_options,
         )
 
@@ -270,24 +314,30 @@ def get_suggested_node_and_input(
     use_upstream_first = options.get("use_upstream_first", True)
     tau = float(options.get("uncertainty_threshold_tau", 100.0))
 
-    # Predict node-wise uncertainties over external-input candidates
-    uncertainty_options = _make_uncertainty_options(
-        options=options,
-        mc_samples=mc_samples,
-    )
+    # Group-local uncertainty proxy used only for shortlist.
+    # This avoids forcing an all-node rollout when only a subset of nodes is needed.
+    group_var_cols = []
+    for node_group in node_groups:
+        try:
+            group_var_j = _group_variance_from_base_candidates(
+                predictor=predictor,
+                base_x=Xcand,
+                node_group=node_group,
+                mc_samples=mc_samples,
+                options=options,
+            )  # [N]
+        except RuntimeError:
+            # Example: DKL node has no real training data yet.
+            group_var_j = torch.full(
+                (Xcand.shape[0],),
+                float("-inf"),
+                dtype=Xcand.dtype,
+                device=Xcand.device,
+            )
 
-    _, var_all = predict_mean_var_all_nodes(
-        predictor=predictor,
-        X=Xcand,
-        options=uncertainty_options,
-    )  # [N, n_nodes]
+        group_var_cols.append(group_var_j.unsqueeze(-1))
 
-    # Group-wise uncertainty proxy used only for shortlist
-    group_var = reduce_group_variances(
-        var_all=var_all,
-        node_groups=node_groups,
-        reduction=var_reduction,
-    )  # [N, n_groups]
+    group_var = torch.cat(group_var_cols, dim=-1)  # [N, n_groups]
 
     group_effective_costs = effective_group_costs(problem, node_groups)
 
@@ -315,10 +365,9 @@ def get_suggested_node_and_input(
 
     # If no partial group is affordable, fall back to full-network UQ
     if len(affordable_group_indices) == 0:
-        _, pred_var = predict_mean_var(
+        _, pred_var = predict_sink_mean_var(
             predictor=predictor,
             X=Xcand,
-            node_idx=None,
             options=uncertainty_options,
         )
 
@@ -460,20 +509,11 @@ def get_suggested_node_and_input(
                 for cand_idx_candidate in shortlisted_candidate_indices:
                     base_x_candidate = Xcand[cand_idx_candidate : cand_idx_candidate + 1]
 
-                    eval_x_candidate = build_eval_input_for_node_group(
-                        predictor=predictor,
-                        base_x=base_x_candidate,
-                        node_group=node_group_candidate,
-                        mc_samples=mc_samples,
-                        options=options,
-                    )
-
                     fantasy_gain = _score_candidate_group_by_fantasy_gain(
                         problem=problem,
                         predictor=predictor,
                         state=state,
                         base_x=base_x_candidate,
-                        eval_x=eval_x_candidate,
                         node_group=node_group_candidate,
                         current_holdout_loss=current_holdout_loss,
                         selector_holdout_X=selector_holdout_X,
@@ -497,6 +537,28 @@ def get_suggested_node_and_input(
             f"Unsupported selector_objective: {selector_objective}. "
             "Use 'uncertainty' or 'fantasy_gain'."
         )
+    
+    if not torch.isfinite(masked_scores).any():
+        _, pred_var = predict_sink_mean_var(
+            predictor=predictor,
+            X=Xcand,
+            options=uncertainty_options,
+        )
+
+        idx = torch.argmax(pred_var.view(-1))
+        base_x = Xcand[idx : idx + 1]
+        eval_x = base_x
+
+        if debug_selector:
+            logger.info(
+                "[selector] all partial-group scores are invalid; "
+                f"fallback full eval. max_sink_var={float(pred_var.max().item()):.6f}"
+            )
+
+        return base_x, eval_x, None, float(pred_var[idx].item()), {
+            "mode": "fallback_full_all_partial_invalid",
+            "selected_candidate_idx": int(idx.item()),
+        }
 
     cand_idx, group_idx, best_score = select_top_cost_aware_action(masked_scores)
     base_x = Xcand[cand_idx : cand_idx + 1]

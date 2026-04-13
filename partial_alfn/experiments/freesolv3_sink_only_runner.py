@@ -8,7 +8,7 @@ Query policy:
 - at each round, evaluates the full function network at one external input
 
 Modeling / saved metrics:
-- predicts all node outputs jointly from base_x
+- predicts all node outputs through the backend predictor
 - uses sink uncertainty for acquisition
 - saves sink test loss
 - saves teacher-forced node test losses for all nodes
@@ -17,7 +17,8 @@ Modeling / saved metrics:
 
 Example:
     python -m partial_alfn.experiments.freesolv3_sink_only_runner \
-        --trial 0 --algo NN_UQ --costs 1_3 --budget 300
+        --trial 0 --algo NN_UQ --costs 1_3 --budget 300 \
+        --predictor_type dkl --acquisition_mode uncertainty
 """
 
 import argparse
@@ -25,16 +26,21 @@ import os
 import random
 import time
 from copy import deepcopy
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from botorch.logging import logger
 from botorch.utils.sampling import draw_sobol_samples
 
+from partial_alfn.models.model_factory import build_predictor
 from partial_alfn.test_functions.freesolv3 import Freesolv3FunctionNetwork
+from partial_alfn.training.train_factory import train_predictor_partial_backend
+from partial_alfn.uncertainty.base import (
+    predict_mean_var_all_nodes,
+    predict_sink_mean_var,
+)
 
 torch.set_default_dtype(torch.float64)
 
@@ -42,93 +48,6 @@ tkwargs = {
     "dtype": torch.double,
     "device": torch.device("cpu"),
 }
-
-
-class MultiOutputMCDropoutMLP(nn.Module):
-    """
-    Full-output regression model:
-        base_x -> [node0, node1, ..., sink]
-    """
-
-    def __init__(self, in_dim: int, out_dim: int, hidden: int = 256, p_drop: float = 0.1):
-        super().__init__()
-        self.in_dim = int(in_dim)
-        self.out_dim = int(out_dim)
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.ReLU(),
-            nn.Dropout(p_drop),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Dropout(p_drop),
-            nn.Linear(hidden, out_dim),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-    def forward_all(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward(x)
-
-    def forward_node(self, x: torch.Tensor, node_idx: int) -> torch.Tensor:
-        y = self.forward(x)
-        return y[:, [node_idx]]
-
-    def forward_sink(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.forward(x)
-        return y[:, [-1]]
-
-
-def _enable_mc_dropout(m: nn.Module) -> None:
-    if isinstance(m, (nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
-        m.train()
-
-
-@torch.no_grad()
-def mc_predict_mean_var_sink(
-    predictor: nn.Module,
-    X: torch.Tensor,
-    mc_samples: int = 30,
-):
-    """
-    Acquisition uses sink uncertainty only.
-    """
-    predictor.eval()
-    predictor.apply(_enable_mc_dropout)
-
-    outs = []
-    for _ in range(mc_samples):
-        outs.append(predictor.forward_sink(X))  # [N, 1]
-
-    Y = torch.stack(outs, dim=0)  # [S, N, 1]
-    mean = Y.mean(dim=0)
-    var = Y.var(dim=0, unbiased=False)
-    return mean, var
-
-
-@torch.no_grad()
-def mc_predict_mean_var_all(
-    predictor: nn.Module,
-    X: torch.Tensor,
-    mc_samples: int = 30,
-):
-    """
-    MC-dropout estimate for all node outputs.
-    Returns:
-        mean_all: [N, n_nodes]
-        var_all:  [N, n_nodes]
-    """
-    predictor.eval()
-    predictor.apply(_enable_mc_dropout)
-
-    outs = []
-    for _ in range(mc_samples):
-        outs.append(predictor.forward_all(X))  # [N, n_nodes]
-
-    Y = torch.stack(outs, dim=0)  # [S, N, n_nodes]
-    mean = Y.mean(dim=0)
-    var = Y.var(dim=0, unbiased=False)
-    return mean, var
 
 
 def make_candidates(problem, n_sobol: int = 256) -> torch.Tensor:
@@ -154,7 +73,7 @@ def make_test_set(problem, n_test: int = 512, seed: int = 0):
 
 
 def compute_sink_test_loss(
-    predictor: nn.Module,
+    predictor: torch.nn.Module,
     test_X: torch.Tensor,
     test_y_sink: torch.Tensor,
 ) -> float:
@@ -166,14 +85,10 @@ def compute_sink_test_loss(
 
 
 def compute_teacher_forced_node_losses(
-    predictor: nn.Module,
+    predictor: torch.nn.Module,
     test_X: torch.Tensor,
     test_Y_full: torch.Tensor,
 ) -> Dict[int, float]:
-    """
-    For this sink-only baseline, all node predictions are direct predictions from base_x.
-    We still report them as node-wise test losses so they can be compared downstream.
-    """
     predictor.eval()
     with torch.no_grad():
         pred_all = predictor.forward_all(test_X)  # [N, n_nodes]
@@ -201,7 +116,10 @@ def init_node_metric_history(metric_dict: Dict[int, float]) -> Dict[int, list]:
     return {int(k): [float(v)] for k, v in metric_dict.items()}
 
 
-def append_node_metric_history(history: Dict[int, list], metric_dict: Dict[int, float]) -> Dict[int, list]:
+def append_node_metric_history(
+    history: Dict[int, list],
+    metric_dict: Dict[int, float],
+) -> Dict[int, list]:
     for k, v in metric_dict.items():
         kk = int(k)
         history.setdefault(kk, [])
@@ -209,76 +127,137 @@ def append_node_metric_history(history: Dict[int, list], metric_dict: Dict[int, 
     return history
 
 
-def train_full_output_predictor(
-    predictor: nn.Module,
-    train_X: torch.Tensor,
-    train_Y_full: torch.Tensor,
+def _build_backend_options(
     *,
-    n_steps: int = 200,
+    problem,
+    predictor_type: str,
+    hidden: int,
+    p_drop: float,
+    mc_samples: int,
+    dkl_feature_dim: int,
+    dkl_kernel: str,
+    train_steps: int = 200,
     batch_size: int = 64,
     lr: float = 1e-3,
     weight_decay: float = 1e-6,
     sink_loss_weight: float = 1.0,
-    intermediate_loss_weight: float = 1.0,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-) -> torch.optim.Optimizer:
-    predictor.train()
+    aux_loss_weight: float = 1.0,
+) -> Dict:
+    return {
+        "predictor_type": str(predictor_type).lower(),
+        "hidden": int(hidden),
+        "p_drop": float(p_drop),
+        "mc_samples": int(mc_samples),
+        "n_samples": int(mc_samples),  # used by DKL uncertainty path
+        "feature_dim": int(dkl_feature_dim),
+        "kernel_type": str(dkl_kernel).lower(),
+        "sink_idx": int(problem.n_nodes - 1),
+        "n_steps": int(train_steps),
+        "batch_size": int(batch_size),
+        "lr": float(lr),
+        "weight_decay": float(weight_decay),
+        "sink_loss_weight": float(sink_loss_weight),
+        "aux_loss_weight": float(aux_loss_weight),
+    }
 
-    if optimizer is None:
-        optimizer = torch.optim.Adam(
-            predictor.parameters(),
-            lr=lr,
-            weight_decay=weight_decay,
+
+def _build_nodewise_datasets_from_full_evals(
+    *,
+    problem,
+    base_X: torch.Tensor,
+    Y_full: torch.Tensor,
+) -> Tuple[Sequence[torch.Tensor], Sequence[torch.Tensor]]:
+    """
+    Convert full evaluations (base_X -> Y_full) into teacher-forced node-wise
+    datasets expected by train_predictor_partial_backend.
+
+    For node j:
+      X_j = concat(parent node outputs, active external inputs)
+      Y_j = observed node j output
+    """
+    if base_X.ndim != 2:
+        raise ValueError(f"base_X must be 2D, got {tuple(base_X.shape)}")
+    if Y_full.ndim != 2:
+        raise ValueError(f"Y_full must be 2D, got {tuple(Y_full.shape)}")
+    if base_X.shape[0] != Y_full.shape[0]:
+        raise ValueError(
+            f"base_X and Y_full must have the same number of rows, got "
+            f"{base_X.shape[0]} and {Y_full.shape[0]}"
+        )
+    if Y_full.shape[1] != int(problem.n_nodes):
+        raise ValueError(
+            f"Y_full second dimension must equal problem.n_nodes={problem.n_nodes}, "
+            f"got {Y_full.shape[1]}"
         )
 
-    n = train_X.shape[0]
-    if n == 0:
-        return optimizer
+    train_X_nodes = []
+    train_Y_nodes = []
 
-    n_nodes = train_Y_full.shape[1]
+    for j in range(int(problem.n_nodes)):
+        parts = []
 
-    for _ in range(n_steps):
-        idx = torch.randint(0, n, (min(batch_size, n),), device=train_X.device)
-        xb = train_X[idx]
-        yb = train_Y_full[idx]
+        for p in problem.parent_nodes[j]:
+            parts.append(Y_full[:, [p]])
 
-        optimizer.zero_grad()
+        active_idx = list(problem.active_input_indices[j])
+        if len(active_idx) > 0:
+            parts.append(base_X[:, active_idx])
 
-        pred_all = predictor.forward_all(xb)  # [B, n_nodes]
+        if len(parts) == 0:
+            raise ValueError(
+                f"Node {j} has neither parents nor active external inputs."
+            )
 
-        sink_loss = F.mse_loss(pred_all[:, [-1]], yb[:, [-1]])
+        xj = torch.cat(parts, dim=-1)
+        yj = Y_full[:, [j]]
 
-        if n_nodes > 1:
-            inter_loss = F.mse_loss(pred_all[:, :-1], yb[:, :-1])
-        else:
-            inter_loss = torch.tensor(0.0, dtype=pred_all.dtype, device=pred_all.device)
+        train_X_nodes.append(xj)
+        train_Y_nodes.append(yj)
 
-        total_loss = sink_loss_weight * sink_loss + intermediate_loss_weight * inter_loss
-        total_loss.backward()
-        optimizer.step()
+    return train_X_nodes, train_Y_nodes
 
-    return optimizer
+
+def train_backend_predictor(
+    *,
+    predictor: torch.nn.Module,
+    problem,
+    train_X: torch.Tensor,
+    train_Y_full: torch.Tensor,
+    backend_options: Dict,
+    optimizer=None,
+    verbose: bool = False,
+):
+    train_X_nodes, train_Y_nodes = _build_nodewise_datasets_from_full_evals(
+        problem=problem,
+        base_X=train_X,
+        Y_full=train_Y_full,
+    )
+    return train_predictor_partial_backend(
+        predictor=predictor,
+        train_X_nodes=train_X_nodes,
+        train_Y_nodes=train_Y_nodes,
+        options=backend_options,
+        sink_idx=problem.n_nodes - 1,
+        optimizer=optimizer,
+        verbose=verbose,
+    )
 
 
 def score_candidate_by_fantasy_gain(
     *,
-    predictor: nn.Module,
+    predictor: torch.nn.Module,
+    problem,
+    backend_options: Dict,
     train_X: torch.Tensor,
     train_Y_full: torch.Tensor,
     base_x: torch.Tensor,
     selector_holdout_X: torch.Tensor,
     selector_holdout_y_sink: torch.Tensor,
-    mc_samples: int = 30,
     fantasy_train_steps: int = 20,
-    batch_size: int = 64,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-6,
-    sink_loss_weight: float = 1.0,
-    intermediate_loss_weight: float = 1.0,
 ) -> float:
     """
     Fantasy gain = current_holdout_loss - fantasy_holdout_loss
-    where the fantasy label is the MC-dropout predictive mean of all node outputs.
+    where the fantasy label is the backend predictive mean of all node outputs.
     """
     current_holdout_loss = compute_sink_test_loss(
         predictor=predictor,
@@ -286,10 +265,10 @@ def score_candidate_by_fantasy_gain(
         test_y_sink=selector_holdout_y_sink,
     )
 
-    mean_all, _ = mc_predict_mean_var_all(
+    mean_all, _ = predict_mean_var_all_nodes(
         predictor=predictor,
         X=base_x,
-        mc_samples=mc_samples,
+        options=backend_options,
     )  # [1, n_nodes]
 
     fantasy_predictor = deepcopy(predictor)
@@ -297,17 +276,17 @@ def score_candidate_by_fantasy_gain(
     fantasy_train_X = torch.cat((train_X, base_x), dim=0)
     fantasy_train_Y_full = torch.cat((train_Y_full, mean_all), dim=0)
 
-    train_full_output_predictor(
+    fantasy_options = dict(backend_options)
+    fantasy_options["n_steps"] = int(fantasy_train_steps)
+
+    train_backend_predictor(
         predictor=fantasy_predictor,
+        problem=problem,
         train_X=fantasy_train_X,
         train_Y_full=fantasy_train_Y_full,
-        n_steps=fantasy_train_steps,
-        batch_size=batch_size,
-        lr=lr,
-        weight_decay=weight_decay,
-        sink_loss_weight=sink_loss_weight,
-        intermediate_loss_weight=intermediate_loss_weight,
+        backend_options=fantasy_options,
         optimizer=None,
+        verbose=False,
     )
 
     fantasy_holdout_loss = compute_sink_test_loss(
@@ -322,22 +301,17 @@ def score_candidate_by_fantasy_gain(
 def select_next_input(
     algo: str,
     problem,
-    predictor: nn.Module,
+    predictor: torch.nn.Module,
     *,
+    backend_options: Dict,
     train_X: Optional[torch.Tensor] = None,
     train_Y_full: Optional[torch.Tensor] = None,
     acquisition_mode: str = "uncertainty",
     selector_holdout_X: Optional[torch.Tensor] = None,
     selector_holdout_y_sink: Optional[torch.Tensor] = None,
-    mc_samples: int = 30,
     n_sobol: int = 256,
     fantasy_topk_candidates: int = 8,
     fantasy_train_steps: int = 20,
-    batch_size: int = 64,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-6,
-    sink_loss_weight: float = 1.0,
-    intermediate_loss_weight: float = 1.0,
 ) -> Dict:
     """
     Returns:
@@ -367,10 +341,10 @@ def select_next_input(
         raise ValueError(f"Unsupported acquisition_mode: {acquisition_mode}")
 
     Xcand = make_candidates(problem, n_sobol=n_sobol)
-    _, var_sink = mc_predict_mean_var_sink(
+    _, var_sink = predict_sink_mean_var(
         predictor=predictor,
         X=Xcand,
-        mc_samples=mc_samples,
+        options=backend_options,
     )  # [N, 1]
 
     sink_scores = var_sink.view(-1)
@@ -413,18 +387,14 @@ def select_next_input(
 
         fantasy_gain = score_candidate_by_fantasy_gain(
             predictor=predictor,
+            problem=problem,
+            backend_options=backend_options,
             train_X=train_X,
             train_Y_full=train_Y_full,
             base_x=base_x_candidate,
             selector_holdout_X=selector_holdout_X,
             selector_holdout_y_sink=selector_holdout_y_sink,
-            mc_samples=mc_samples,
             fantasy_train_steps=fantasy_train_steps,
-            batch_size=batch_size,
-            lr=lr,
-            weight_decay=weight_decay,
-            sink_loss_weight=sink_loss_weight,
-            intermediate_loss_weight=intermediate_loss_weight,
         )
 
         if best_gain is None or fantasy_gain > best_gain:
@@ -475,6 +445,12 @@ def run_one_trial(
     trial: int,
     budget: int,
     noisy: bool,
+    predictor_type: str = "mcd",
+    hidden: int = 256,
+    p_drop: float = 0.1,
+    mc_samples: int = 30,
+    dkl_feature_dim: int = 32,
+    dkl_kernel: str = "rbf",
     acquisition_mode: str = "uncertainty",
     fantasy_topk_candidates: int = 8,
     fantasy_train_steps: int = 20,
@@ -482,17 +458,34 @@ def run_one_trial(
     if algo not in ["Random", "NN_UQ"]:
         raise ValueError(f"Unsupported algo: {algo}")
 
+    backend_options = _build_backend_options(
+        problem=problem,
+        predictor_type=predictor_type,
+        hidden=hidden,
+        p_drop=p_drop,
+        mc_samples=mc_samples,
+        dkl_feature_dim=dkl_feature_dim,
+        dkl_kernel=dkl_kernel,
+        train_steps=200,
+        batch_size=64,
+        lr=1e-3,
+        weight_decay=1e-6,
+        sink_loss_weight=1.0,
+        aux_loss_weight=1.0,
+    )
+
     results_dir = (
         f"./results_sink_only/"
         f"{problem_name}_{'_'.join(str(x) for x in problem.node_costs)}/"
-        f"{algo}_{acquisition_mode}/"
-    )    
+        f"{algo}_{str(predictor_type).lower()}_{acquisition_mode}/"
+    )
     os.makedirs(results_dir, exist_ok=True)
 
     logger.info(
         f"============================Start Sink-Only Experiment=================================\n"
         f"Experiment: {problem_name}_{'_'.join(str(x) for x in problem.node_costs)}\n"
         f"Algorithm: {algo}\n"
+        f"Predictor: {predictor_type}\n"
         f"Trial: {trial}"
     )
 
@@ -500,12 +493,7 @@ def run_one_trial(
     np.random.seed(trial)
     random.seed(trial)
 
-    predictor = MultiOutputMCDropoutMLP(
-        in_dim=problem.dim,
-        out_dim=problem.n_nodes,
-        hidden=256,
-        p_drop=0.1,
-    ).to(torch.get_default_dtype())
+    predictor = build_predictor(problem, backend_options).to(torch.get_default_dtype())
 
     val_X, val_Y_full, val_y_sink = make_test_set(
         problem,
@@ -539,20 +527,14 @@ def run_one_trial(
     train_Y_full = init_Y_full.clone()
     train_y_sink = init_Y_full[..., [-1]].clone()
 
-    optimizer = torch.optim.Adam(
-        predictor.parameters(),
-        lr=1e-3,
-        weight_decay=1e-6,
-    )
-    optimizer = train_full_output_predictor(
+    optimizer_state = train_backend_predictor(
         predictor=predictor,
+        problem=problem,
         train_X=train_X,
         train_Y_full=train_Y_full,
-        n_steps=200,
-        batch_size=64,
-        sink_loss_weight=1.0,
-        intermediate_loss_weight=1.0,
-        optimizer=optimizer,
+        backend_options=backend_options,
+        optimizer=None,
+        verbose=False,
     )
 
     test_loss = compute_sink_test_loss(
@@ -598,20 +580,15 @@ def run_one_trial(
             algo=algo,
             problem=problem,
             predictor=predictor,
+            backend_options=backend_options,
             train_X=train_X,
             train_Y_full=train_Y_full,
             acquisition_mode=acquisition_mode,
             selector_holdout_X=val_X,
             selector_holdout_y_sink=val_y_sink,
-            mc_samples=30,
             n_sobol=256,
             fantasy_topk_candidates=fantasy_topk_candidates,
             fantasy_train_steps=fantasy_train_steps,
-            batch_size=64,
-            lr=1e-3,
-            weight_decay=1e-6,
-            sink_loss_weight=1.0,
-            intermediate_loss_weight=1.0,
         )
         t1 = time.time()
 
@@ -639,15 +616,14 @@ def run_one_trial(
         train_Y_full = torch.cat((train_Y_full, y_full), dim=0)
         train_y_sink = torch.cat((train_y_sink, y_sink), dim=0)
 
-        optimizer = train_full_output_predictor(
+        optimizer_state = train_backend_predictor(
             predictor=predictor,
+            problem=problem,
             train_X=train_X,
             train_Y_full=train_Y_full,
-            n_steps=200,
-            batch_size=64,
-            sink_loss_weight=1.0,
-            intermediate_loss_weight=1.0,
-            optimizer=optimizer,
+            backend_options=backend_options,
+            optimizer=optimizer_state,
+            verbose=False,
         )
 
         test_loss = compute_sink_test_loss(
@@ -686,6 +662,13 @@ def run_one_trial(
         torch.save(
             {
                 "bo_budget": budget,
+                "predictor_type": str(predictor_type).lower(),
+                "hidden": hidden,
+                "p_drop": p_drop,
+                "mc_samples": mc_samples,
+                "dkl_feature_dim": dkl_feature_dim,
+                "dkl_kernel": dkl_kernel,
+                "acquisition_mode": acquisition_mode,
                 "cumulative_costs": cumulative_costs,
                 "test_losses": test_losses,
                 "best_test_loss": best_test_loss,
@@ -723,6 +706,24 @@ def parse():
     parser.add_argument("--costs", "-c", type=str, required=True)
     parser.add_argument("--budget", "-b", type=int, default=200)
     parser.add_argument("--noisy", action="store_true")
+
+    parser.add_argument(
+        "--predictor_type",
+        type=str,
+        default="mcd",
+        choices=["mcd", "dkl"],
+    )
+    parser.add_argument("--hidden", type=int, default=256)
+    parser.add_argument("--p_drop", type=float, default=0.1)
+    parser.add_argument("--mc_samples", type=int, default=30)
+    parser.add_argument("--dkl_feature_dim", type=int, default=32)
+    parser.add_argument(
+        "--dkl_kernel",
+        type=str,
+        default="rbf",
+        choices=["rbf", "matern"],
+    )
+
     parser.add_argument(
         "--acquisition_mode",
         type=str,
@@ -740,6 +741,12 @@ def main(
     costs: str,
     budget: int,
     noisy: bool = False,
+    predictor_type: str = "mcd",
+    hidden: int = 256,
+    p_drop: float = 0.1,
+    mc_samples: int = 30,
+    dkl_feature_dim: int = 32,
+    dkl_kernel: str = "rbf",
     acquisition_mode: str = "uncertainty",
     fantasy_topk_candidates: int = 8,
     fantasy_train_steps: int = 20,
@@ -764,6 +771,12 @@ def main(
         trial=trial,
         budget=budget,
         noisy=noisy,
+        predictor_type=predictor_type,
+        hidden=hidden,
+        p_drop=p_drop,
+        mc_samples=mc_samples,
+        dkl_feature_dim=dkl_feature_dim,
+        dkl_kernel=dkl_kernel,
         acquisition_mode=acquisition_mode,
         fantasy_topk_candidates=fantasy_topk_candidates,
         fantasy_train_steps=fantasy_train_steps,

@@ -7,6 +7,7 @@ def parse():
     parser = argparse.ArgumentParser(
         description="Run one replication of an AL experiment."
     )
+
     parser.add_argument("--trial", "-t", type=int, default=0)
     parser.add_argument(
         "--algo",
@@ -17,6 +18,11 @@ def parse():
     )
     parser.add_argument("--costs", "-c", type=str, required=True)
     parser.add_argument("--budget", "-b", type=int, default=200)
+    parser.add_argument(
+        "--noisy",
+        action="store_true",
+        help="Use the noisy problem variant.",
+    )
 
     # predictor backend
     parser.add_argument(
@@ -48,5 +54,27 @@ def parse():
         choices=["rbf", "matern"],
     )
     parser.add_argument("--n_posterior_samples", type=int, default=64)
+
+    # runner / selector mode
+    parser.add_argument(
+        "--sink_only",
+        action="store_true",
+        help=(
+            "Run in sink-only mode. In the current freesolv3_runner design, "
+            "this maps to enable_partial_queries=False."
+        ),
+    )
+    parser.add_argument(
+        "--sink_selector_objective",
+        type=str,
+        default="uncertainty",
+        choices=["uncertainty", "fantasy_gain"],
+        help=(
+            "Objective used when --sink_only is enabled. "
+            "Note: the current freesolv3_runner implementation only supports "
+            "'uncertainty' in sink-only mode unless select_next_query.py is "
+            "extended further."
+        ),
+    )
 
     return parser.parse_args()

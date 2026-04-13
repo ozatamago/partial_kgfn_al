@@ -316,6 +316,60 @@ def predict_mean_var_all_nodes(
 
     raise RuntimeError("Unreachable predictor type branch.")
 
+@torch.no_grad()
+def predict_sink_mean_var(
+    predictor: nn.Module,
+    X: torch.Tensor,
+    options: Optional[Dict[str, Any]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convenience wrapper for sink prediction from external-input space.
+
+    Equivalent to:
+        predict_mean_var(predictor, X, node_idx=None, options=options)
+
+    Returns
+    -------
+    mean_sink: torch.Tensor
+        Shape [N, 1]
+    var_sink: torch.Tensor
+        Shape [N, 1]
+    """
+    return predict_mean_var(
+        predictor=predictor,
+        X=X,
+        node_idx=None,
+        options=options,
+    )
+
+
+@torch.no_grad()
+def predict_node_mean_var_from_base(
+    predictor: nn.Module,
+    X: torch.Tensor,
+    node_idx: int,
+    options: Optional[Dict[str, Any]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convenience wrapper for predicting one node from external-input space.
+
+    This is mainly a readability helper for selectors / runners that always
+    start from base input space.
+    """
+    _validate_2d_input(X, name="X")
+    ext_dim = _get_external_input_dim(predictor)
+    if X.shape[1] != ext_dim:
+        raise ValueError(
+            f"X must be in external-input space with dim {ext_dim}, "
+            f"got shape {tuple(X.shape)}"
+        )
+
+    return predict_mean_var(
+        predictor=predictor,
+        X=X,
+        node_idx=node_idx,
+        options=options,
+    )
 
 @torch.no_grad()
 def sample_all_nodes_from_base(

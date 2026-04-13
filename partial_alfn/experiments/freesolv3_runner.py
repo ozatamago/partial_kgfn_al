@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-
-r"""
-FreeSolv problem runner for AL-style fantasy-gain NN_UQ experiments.
-"""
+r"""FreeSolv problem runner for AL-style NN_UQ experiments."""
 
 import logging
 import warnings
 
 import torch
 
+from partial_alfn.configs.al_defaults import (
+    get_default_al_options,
+    get_default_sink_only_options,
+)
+from partial_alfn.data.testset import make_test_set
 from partial_alfn.models.model_factory import build_predictor
 from partial_alfn.runners.al_runner import run_one_trial
 from partial_alfn.runners.cli import parse
-from partial_alfn.data.testset import make_test_set
 from partial_alfn.test_functions.freesolv3 import Freesolv3FunctionNetwork
-from partial_alfn.configs.al_defaults import get_default_al_options
 
 warnings.filterwarnings("ignore")
 torch.set_default_dtype(torch.float64)
@@ -23,6 +23,57 @@ logger = logging.getLogger("botorch")
 logger.setLevel(logging.INFO)
 if logger.handlers:
     logger.handlers.pop()
+
+
+def _selector_options_for_mode(
+    *,
+    problem,
+    sink_only: bool,
+    sink_selector_objective: str,
+) -> dict:
+    """
+    Build selector-related options.
+
+    Assumptions
+    -----------
+    - sink_only=False:
+        partial-query mode is enabled, and the default selector is fantasy_gain.
+    - sink_only=True:
+        full-evaluation mode is enabled, and selector_objective can be either
+        uncertainty or fantasy_gain, assuming select_next_query.py supports both.
+    """
+    if sink_only:
+        objective = str(sink_selector_objective).strip().lower()
+        if objective not in {"uncertainty", "fantasy_gain"}:
+            raise ValueError(
+                "sink_selector_objective must be either "
+                "'uncertainty' or 'fantasy_gain'."
+            )
+
+        return {
+            "enable_partial_queries": False,
+            "selector_objective": objective,
+            "selector_metric": "sink_test_loss",
+            "fantasy_train_steps": 20,
+            "fantasy_topk_candidates": 8,
+            "fantasy_topk_groups": 2,
+        }
+
+    out = {
+        "enable_partial_queries": True,
+        "selector_objective": "fantasy_gain",
+        "selector_metric": "sink_test_loss",
+        "fantasy_train_steps": 20,
+        "fantasy_topk_candidates": 8,
+        "fantasy_topk_groups": 2,
+    }
+
+    n_nodes = getattr(problem, "n_nodes", 0)
+    if n_nodes >= 2:
+        out["upstream_group_indices"] = list(range(n_nodes - 1))
+        out["downstream_group_indices"] = [n_nodes - 1]
+
+    return out
 
 
 def main(
@@ -39,6 +90,8 @@ def main(
     dkl_feature_dim: int = 32,
     dkl_kernel: str = "rbf",
     n_posterior_samples: int = 64,
+    sink_only: bool = False,
+    sink_selector_objective: str = "uncertainty",
 ) -> None:
     cost_options = {
         "1_1": [1, 1],
@@ -59,57 +112,59 @@ def main(
 
     metrics = ["obs_val", "test_loss"]
 
-    options = get_default_al_options(problem)
-
-    # Example:
-    # options["predictor_type"] = "mcd"
-    # options["predictor_type"] = "dkl"
-
-    predictor = build_predictor(problem, options)
-
     val_X, val_y = make_test_set(
         problem=problem,
         n_test=256,
         seed=trial + 54321,
     )
-
     test_X, test_y = make_test_set(
         problem=problem,
         n_test=512,
         seed=trial + 12345,
     )
 
-    options = get_default_al_options(problem)
-    options.update({
-        "predictor_type": predictor_type,
-        "hidden": hidden,
-        "p_drop": p_drop,
-        "mc_samples": mc_samples,
-        "dkl_inference": dkl_inference,
-        "dkl_feature_dim": dkl_feature_dim,
-        "dkl_kernel": dkl_kernel,
-        "feature_dim": dkl_feature_dim,
-        "kernel_type": dkl_kernel,
-        "n_posterior_samples": n_posterior_samples,
-    })
+    # mode-aware defaults
+    if sink_only:
+        options = get_default_sink_only_options(problem)
+    else:
+        options = get_default_al_options(problem)
+
+    options.update(
+        {
+            "predictor_type": predictor_type,
+            "hidden": hidden,
+            "p_drop": p_drop,
+            "mc_samples": mc_samples,
+            "dkl_inference": dkl_inference,
+            "dkl_feature_dim": dkl_feature_dim,
+            "dkl_kernel": dkl_kernel,
+            # aliases consumed by model_factory.py
+            "feature_dim": dkl_feature_dim,
+            "kernel_type": dkl_kernel,
+            "n_posterior_samples": n_posterior_samples,
+        }
+    )
+
+    options.update(
+        _selector_options_for_mode(
+            problem=problem,
+            sink_only=sink_only,
+            sink_selector_objective=sink_selector_objective,
+        )
+    )
 
     predictor = build_predictor(problem, options)
 
-    options.update({
-        "predictor": predictor,
-        "test_X": test_X,
-        "test_y": test_y,
-        "val_X": val_X,
-        "val_y": val_y,
-        "task": "regression",
-        "selector_objective": "fantasy_gain",
-        "selector_metric": "sink_test_loss",
-        "fantasy_train_steps": 20,
-        "fantasy_topk_candidates": 8,
-        "fantasy_topk_groups": 2,
-        "upstream_group_indices": [0],
-        "downstream_group_indices": [1],
-    })
+    options.update(
+        {
+            "predictor": predictor,
+            "test_X": test_X,
+            "test_y": test_y,
+            "val_X": val_X,
+            "val_y": val_y,
+            "task": "regression",
+        }
+    )
 
     run_one_trial(
         problem_name=problem_name,
