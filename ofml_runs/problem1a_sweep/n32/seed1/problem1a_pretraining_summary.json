@@ -6,18 +6,18 @@
     "n_train_samples": 32,
     "used_total_cost": 96.0,
     "used_target_cost": 96.0,
-    "final_train_loss": 1.3053508155280724e-05,
-    "final_val_loss": 0.0003461834858171642,
-    "best_val_loss": 0.0003461834858171642,
+    "final_train_loss": 1.7110812677856302e-06,
+    "final_val_loss": 0.0002227392396889627,
+    "best_val_loss": 0.0002227392396889627,
     "best_step": 500,
-    "test_loss": 0.00042429330642335117
+    "test_loss": 0.00020017425413243473
   },
   "pretrain": {
     "phase_name": "pretrain_sources",
     "n_train_samples": 256,
     "used_total_cost": 384.0,
     "used_target_cost": 0.0,
-    "final_train_loss": 1.753551623551175e-05,
+    "final_train_loss": 9.760091415955685e-06,
     "final_val_loss": null,
     "best_val_loss": null,
     "best_step": -1,
@@ -28,17 +28,17 @@
     "n_train_samples": 32,
     "used_total_cost": 96.0,
     "used_target_cost": 96.0,
-    "final_train_loss": 8.036718099901918e-06,
-    "final_val_loss": 6.456619303207844e-05,
-    "best_val_loss": 6.456619303207844e-05,
+    "final_train_loss": 1.4295856090029702e-06,
+    "final_val_loss": 8.295694715343416e-05,
+    "best_val_loss": 8.295694715343416e-05,
     "best_step": 300,
-    "test_loss": 7.167895091697574e-05
+    "test_loss": 8.879931556293741e-05
   },
-  "scratch_test_loss": 0.00042429330642335117,
-  "transfer_test_loss": 7.167895091697574e-05,
+  "scratch_test_loss": 0.00020017425413243473,
+  "transfer_test_loss": 8.879931556293741e-05,
   "scratch_target_cost": 96.0,
   "transfer_target_cost": 96.0,
   "transfer_total_cost": 480.0,
-  "delta_test_loss": -0.00035261435550637543,
-  "relative_test_loss_ratio": 0.16893726540539847
+  "delta_test_loss": -0.00011137493856949732,
+  "relative_test_loss_ratio": 0.44361007337231306
 }

@@ -1,0 +1,44 @@
+{
+  "problem_name": "problem_1a",
+  "target_protocol_id": "protocol_3",
+  "scratch": {
+    "phase_name": "scratch_protocol_3",
+    "n_train_samples": 128,
+    "used_total_cost": 384.0,
+    "used_target_cost": 384.0,
+    "final_train_loss": 6.892800229252316e-06,
+    "final_val_loss": 3.21321640512906e-05,
+    "best_val_loss": 3.21321640512906e-05,
+    "best_step": 500,
+    "test_loss": 2.57695974141825e-05
+  },
+  "pretrain": {
+    "phase_name": "pretrain_sources",
+    "n_train_samples": 256,
+    "used_total_cost": 384.0,
+    "used_target_cost": 0.0,
+    "final_train_loss": 1.7389978893334046e-05,
+    "final_val_loss": null,
+    "best_val_loss": null,
+    "best_step": -1,
+    "test_loss": null
+  },
+  "adapt_after_pretrain": {
+    "phase_name": "adapt_protocol_3_after_pretrain",
+    "n_train_samples": 128,
+    "used_total_cost": 384.0,
+    "used_target_cost": 384.0,
+    "final_train_loss": 1.0247586942568887e-05,
+    "final_val_loss": 3.181466308888048e-05,
+    "best_val_loss": 3.181466308888048e-05,
+    "best_step": 300,
+    "test_loss": 2.912213676609099e-05
+  },
+  "scratch_test_loss": 2.57695974141825e-05,
+  "transfer_test_loss": 2.912213676609099e-05,
+  "scratch_target_cost": 384.0,
+  "transfer_target_cost": 384.0,
+  "transfer_total_cost": 768.0,
+  "delta_test_loss": 3.35253935190849e-06,
+  "relative_test_loss_ratio": 1.1300966909969417
+}
