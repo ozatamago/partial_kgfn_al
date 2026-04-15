@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-
 r"""
 Run one trial of active learning on a function network.
 
-Current version:
-- supports sink-only fallback and partial-query mode
-- supports multi-head predictor + partial buffers + partial training
-- keeps all experiment state in a single mutable state dict
-- distinguishes:
-    * base_x : external input in the original input space
-    * eval_x : actual node-specific input passed to problem.evaluate(...)
-- supports DKL resume by rehydrating node-wise train data after checkpoint load
+Minimal OFML-adjusted runner:
+- uses ofml_alfn imports throughout
+- prepares selector_holdout_X / selector_holdout_y from val_X / val_y
+- supports both full-network and partial-query acquisition
+- keeps experiment state in a mutable dict compatible with select_next_query.py
+- trains through train_predictor_partial_backend(...)
 """
 
-import os
+from __future__ import annotations
+
 import random
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -24,15 +22,15 @@ from botorch.logging import logger
 from botorch.test_functions import SyntheticTestFunction
 from botorch.utils.sampling import draw_sobol_samples
 
-from partial_alfn.data.partial_buffers import (
+from ofml_alfn.data.partial_buffers import (
     append_full_network_as_partial,
     init_partial_buffers,
 )
-from partial_alfn.data.update_buffers import (
+from ofml_alfn.data.update_buffers import (
     append_full_observation,
     append_partial_observation,
 )
-from partial_alfn.metrics.evaluation import (
+from ofml_alfn.metrics.evaluation import (
     append_node_metric_history,
     build_node_test_sets,
     compute_rollout_node_losses,
@@ -41,14 +39,10 @@ from partial_alfn.metrics.evaluation import (
     compute_weighted_node_loss,
     init_node_metric_history,
 )
-from partial_alfn.persistence.checkpoint import (
-    load_latest_nn_checkpoint,
-    save_nn_checkpoint,
-)
-from partial_alfn.policies.select_next_query import get_suggested_node_and_input
-from partial_alfn.training.train_factory import train_predictor_partial_backend
-from partial_alfn.utils.construct_obs_set import construct_obs_set
-from partial_alfn.utils.effective_costs import effective_group_cost
+from ofml_alfn.policies.select_next_query import get_suggested_node_and_input
+from ofml_alfn.training.train_factory import train_predictor_partial_backend
+from ofml_alfn.utils.construct_obs_set import construct_obs_set
+from ofml_alfn.utils.effective_costs import effective_group_cost
 
 tkwargs = {
     "dtype": torch.double,
@@ -56,66 +50,10 @@ tkwargs = {
 }
 
 
-def _is_dkl_predictor(predictor: Any) -> bool:
-    return str(getattr(predictor, "predictor_type", "")).lower() == "dkl"
-
-
-def _is_torch_optimizer(x: Any) -> bool:
-    return isinstance(x, torch.optim.Optimizer)
-
-
-def _rehydrate_dkl_predictor_from_state(
-    *,
-    predictor: Any,
-    state: Dict[str, Any],
-) -> None:
-    """
-    Reattach node-wise real training data to a resumed DKL predictor.
-
-    Exact-GP style DKL predictors need their train data to be set on the model
-    object. Loading state_dict alone is not sufficient.
-    """
-    if not _is_dkl_predictor(predictor):
-        return
-
-    train_X_nodes = state.get("train_X", None)
-    train_Y_nodes = state.get("train_Y", None)
-
-    if train_X_nodes is None or train_Y_nodes is None:
-        raise ValueError(
-            "Resume state for a DKL predictor must contain train_X and train_Y."
-        )
-
-    if len(train_X_nodes) != int(predictor.n_nodes):
-        raise ValueError(
-            f"Expected {predictor.n_nodes} node datasets in train_X, "
-            f"got {len(train_X_nodes)}"
-        )
-    if len(train_Y_nodes) != int(predictor.n_nodes):
-        raise ValueError(
-            f"Expected {predictor.n_nodes} node datasets in train_Y, "
-            f"got {len(train_Y_nodes)}"
-        )
-
-    node_counts = []
-    for j, (xj, yj) in enumerate(zip(train_X_nodes, train_Y_nodes)):
-        n_j = 0 if xj is None else int(xj.shape[0])
-        node_counts.append((j, n_j))
-
-        if xj is None or yj is None:
-            continue
-        if xj.shape[0] == 0:
-            continue
-
-        predictor.set_node_train_data(
-            node_idx=j,
-            x=xj,
-            y=yj,
-            strict=False,
-        )
-
-    logger.info(f"[resume] rehydrated DKL node datasets: {node_counts}")
-    predictor.eval()
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def _prepare_test_artifacts(
@@ -127,7 +65,6 @@ def _prepare_test_artifacts(
     Create test artifacts used for reporting.
     """
     test_X = options["test_X"]
-
     if (
         "full_test_Y" not in options
         or options["full_test_Y"] is None
@@ -151,13 +88,12 @@ def _prepare_selector_holdout(options: Dict) -> None:
     Prepare the holdout set used by the acquisition selector.
 
     Preferred:
-        - options["val_X"], options["val_y"]
+      - options["val_X"], options["val_y"]
 
     Fallback:
-        - options["test_X"], options["test_y"]
+      - options["test_X"], options["test_y"]
 
-    This helper only prepares references in `options`.
-    The actual fantasy scoring logic will live in the selector.
+    For the fantasy selector we interpret this holdout as the target validation set.
     """
     if "selector_holdout_X" not in options or options["selector_holdout_X"] is None:
         if "val_X" in options and options["val_X"] is not None:
@@ -166,7 +102,7 @@ def _prepare_selector_holdout(options: Dict) -> None:
             options["selector_holdout_X"] = options["test_X"]
             logger.warning(
                 "selector_holdout_X was not provided. Falling back to test_X. "
-                "For proper model selection, pass val_X explicitly."
+                "For fantasy selection, pass val_X explicitly."
             )
 
     if "selector_holdout_y" not in options or options["selector_holdout_y"] is None:
@@ -176,395 +112,360 @@ def _prepare_selector_holdout(options: Dict) -> None:
             options["selector_holdout_y"] = options["test_y"]
             logger.warning(
                 "selector_holdout_y was not provided. Falling back to test_y. "
-                "For proper model selection, pass val_y explicitly."
+                "For fantasy selection, pass val_y explicitly."
             )
 
-    options.setdefault("selector_objective", "fantasy_gain")
-    options.setdefault("selector_metric", "sink_test_loss")
-    options.setdefault("fantasy_train_steps", 20)
-    options.setdefault("fantasy_topk_candidates", 8)
-    options.setdefault("fantasy_topk_groups", 2)
 
-
-def _compute_node_metric_snapshot(
-    *,
-    predictor,
-    options: Dict,
-    task: str,
-    sink_idx: int,
-) -> Dict[str, Dict[int, float]]:
-    """
-    現時点の node-wise metric を計算する。
-    """
-    tf_losses = compute_teacher_forced_node_losses(
-        predictor=predictor,
-        node_test_X=options["node_test_X"],
-        node_test_Y=options["node_test_Y"],
-        task=task,
-    )
-
-    rollout_losses = compute_rollout_node_losses(
-        predictor=predictor,
-        base_X=options["test_X"],
-        full_Y=options["full_test_Y"],
-        task=task,
-    )
-
-    return {
-        "teacher_forced": tf_losses,
-        "rollout": rollout_losses,
-        "weighted_teacher_forced_all": {
-            -1: compute_weighted_node_loss(tf_losses)
-        },
-        "weighted_teacher_forced_intermediate": {
-            -1: compute_weighted_node_loss(tf_losses, exclude_nodes=[sink_idx])
-        },
-        "weighted_rollout_all": {
-            -1: compute_weighted_node_loss(rollout_losses)
-        },
-        "weighted_rollout_intermediate": {
-            -1: compute_weighted_node_loss(rollout_losses, exclude_nodes=[sink_idx])
-        },
-    }
-
-
-def _make_results_dir(problem_name: str, problem: SyntheticTestFunction, algo: str) -> str:
-    results_dir = f"./results/{problem_name}_{'_'.join(str(x) for x in problem.node_costs)}/{algo}/"
-    os.makedirs(results_dir, exist_ok=True)
-    return results_dir
-
-
-def _initialize_new_experiment(
+def _draw_initial_design(
     *,
     problem: SyntheticTestFunction,
-    trial: int,
     n_init_evals: int,
-    metrics: List[str],
-    options: Dict,
-    noisy: bool,
-) -> Dict:
-    predictor = options["predictor"]
-    test_X = options["test_X"]
-    test_y = options["test_y"]
-    task = options.get("task", "regression")
+) -> torch.Tensor:
+    """
+    Sobol initial design in the external input space.
+    """
+    bounds = problem.bounds.to(**tkwargs)
+    X = draw_sobol_samples(
+        bounds=bounds,
+        n=int(n_init_evals),
+        q=1,
+    ).squeeze(1)
+    return X
 
-    torch.manual_seed(trial)
-    np.random.seed(trial)
-    random.seed(trial)
 
-    X = (
-        draw_sobol_samples(
-            bounds=torch.tensor(problem.bounds, **tkwargs),
-            n=n_init_evals,
-            q=1,
-        )
-        .squeeze(-2)
-        .to(**tkwargs)
+def _evaluate_problem_full(
+    *,
+    problem: SyntheticTestFunction,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Full network evaluation.
+    """
+    return problem.evaluate(x)
+
+
+def _evaluate_problem_partial(
+    *,
+    problem: SyntheticTestFunction,
+    eval_x: torch.Tensor,
+    new_node: Sequence[int],
+) -> torch.Tensor:
+    """
+    Partial-group evaluation.
+
+    This helper tries a few plausible calling conventions because the exact
+    test-function signature may differ across problem classes.
+    """
+    node_group = list(new_node)
+
+    # Most likely convention in this repo family.
+    try:
+        return problem.evaluate(eval_x, idx=node_group)
+    except TypeError:
+        pass
+
+    try:
+        return problem.evaluate(eval_x, idx=node_group[0] if len(node_group) == 1 else node_group)
+    except TypeError:
+        pass
+
+    try:
+        return problem.evaluate(eval_x, node_indices=node_group)
+    except TypeError:
+        pass
+
+    try:
+        return problem.evaluate(eval_x, node_idx=node_group[0] if len(node_group) == 1 else node_group)
+    except TypeError:
+        pass
+
+    raise TypeError(
+        "Could not call partial evaluation on problem. "
+        "Expected something like problem.evaluate(eval_x, idx=new_node)."
     )
 
-    network_output_at_X = problem.evaluate(X)
-    if noisy:
-        network_output_at_X = network_output_at_X + torch.normal(
-            0, 1, size=network_output_at_X.shape
-        )
 
-    # Sink supervision buffer
-    train_X_nn = X.clone()
-    train_y_nn = network_output_at_X[..., [-1]].clone()
-
-    # Original node-wise observation sets
-    train_X, train_Y = construct_obs_set(
-        X=X,
-        Y=network_output_at_X,
+def _init_state_from_full_evals(
+    *,
+    problem: SyntheticTestFunction,
+    init_X: torch.Tensor,
+    init_Y_full: torch.Tensor,
+    options: Dict,
+) -> Dict[str, Any]:
+    """
+    Build the mutable runner state from initial full evaluations.
+    """
+    train_X_nodes, train_Y_nodes = construct_obs_set(
+        X=init_X,
+        Y=init_Y_full,
         parent_nodes=problem.parent_nodes,
         active_input_indices=problem.active_input_indices,
     )
 
-    # Node-wise partial supervision buffers for multi-head training
-    partial_buffers = init_partial_buffers(
-        n_nodes=problem.n_nodes,
-        x_dim=problem.dim,
-        dtype=X.dtype,
-        device=X.device,
-    )
-    append_full_network_as_partial(
-        buffers=partial_buffers,
-        x=X,
-        y_full=network_output_at_X,
-    )
-
-    if _is_dkl_predictor(predictor):
-        nn_optimizer = None
-    else:
-        nn_optimizer = torch.optim.Adam(
-            predictor.parameters(),
-            lr=options.get("nn_lr", 1e-3),
-            weight_decay=options.get("nn_weight_decay", 1e-6),
+    use_partial_buffers = bool(options.get("enable_partial_queries", False))
+    partial_buffers = None
+    if use_partial_buffers:
+        partial_buffers = init_partial_buffers(
+            n_nodes=int(problem.n_nodes),
+            x_dim=int(problem.dim),
+            dtype=init_X.dtype,
+            device=init_X.device,
+        )
+        append_full_network_as_partial(
+            buffers=partial_buffers,
+            x=init_X,
+            y_full=init_Y_full,
         )
 
-    maybe_optimizer = train_predictor_partial_backend(
-        predictor=predictor,
-        train_X_nodes=train_X,
-        train_Y_nodes=train_Y,
-        options=options,
-        sink_idx=problem.n_nodes - 1,
-        optimizer=nn_optimizer,
+    state: Dict[str, Any] = {
+        "train_X": [x.clone() for x in train_X_nodes],
+        "train_Y": [y.clone() for y in train_Y_nodes],
+        "train_X_nn": init_X.clone(),
+        "train_y_nn": init_Y_full[:, [-1]].clone(),
+        "network_output_at_X": init_Y_full.clone(),
+        "node_eval_counts": torch.full(
+            (int(problem.n_nodes),),
+            fill_value=int(init_X.shape[0]),
+            dtype=torch.long,
+            device=init_X.device,
+        ),
+        "partial_buffers": partial_buffers,
+        "chosen_nodes": [],
+        "chosen_costs": [],
+        "elapsed_seconds": [],
+        "test_loss_history": [],
+        "obs_val_history": [],
+    }
+    return state
+
+
+def _group_or_full_cost(
+    *,
+    problem: SyntheticTestFunction,
+    new_node: Optional[Sequence[int]],
+) -> float:
+    if new_node is None:
+        return float(sum(problem.node_costs))
+    return float(effective_group_cost(problem, list(new_node)))
+
+
+def _append_observation(
+    *,
+    problem: SyntheticTestFunction,
+    state: Dict[str, Any],
+    base_x: torch.Tensor,
+    eval_x: torch.Tensor,
+    new_y: torch.Tensor,
+    new_node: Optional[Sequence[int]],
+) -> List[int]:
+    if new_node is None:
+        return append_full_observation(
+            problem=problem,
+            new_x=base_x,
+            new_y=new_y,
+            state=state,
+        )
+
+    return append_partial_observation(
+        problem=problem,
+        base_x=base_x,
+        eval_x=eval_x,
+        new_y=new_y,
+        new_node=list(new_node),
+        state=state,
+        sink_node_idx=int(problem.n_nodes - 1),
     )
 
-    if maybe_optimizer is not None:
-        nn_optimizer = maybe_optimizer
 
-    if "obs_val" in metrics:
-        best_obs_vals = [float(train_y_nn.max().item())]
-    else:
-        best_obs_vals = []
+def _train_predictor_in_place(
+    *,
+    predictor,
+    state: Dict[str, Any],
+    options: Dict,
+    verbose: bool = False,
+):
+    return train_predictor_partial_backend(
+        predictor=predictor,
+        train_X_nodes=state["train_X"],
+        train_Y_nodes=state["train_Y"],
+        options=options,
+        sink_idx=int(len(state["train_X"]) - 1),
+        optimizer=None,
+        verbose=verbose,
+    )
+
+
+def _compute_reporting_metrics(
+    *,
+    predictor,
+    problem: SyntheticTestFunction,
+    options: Dict,
+    metrics: Sequence[str],
+    task: str,
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
 
     if "test_loss" in metrics:
-        test_loss = compute_test_loss(
+        out["test_loss"] = float(
+            compute_test_loss(
+                predictor=predictor,
+                test_X=options["test_X"],
+                test_y=options["test_y"],
+                task=task,
+            )
+        )
+
+    if "obs_val" in metrics:
+        out["obs_val"] = float(
+            compute_test_loss(
+                predictor=predictor,
+                test_X=options["selector_holdout_X"],
+                test_y=options["selector_holdout_y"],
+                task=task,
+            )
+        )
+
+    if "teacher_forced_node_loss" in metrics:
+        tf_losses = compute_teacher_forced_node_losses(
             predictor=predictor,
-            test_X=test_X,
-            test_y=test_y,
+            node_test_X=options["node_test_X"],
+            node_test_Y=options["node_test_Y"],
             task=task,
         )
-        test_losses = [test_loss]
-        best_test_loss = test_loss
-        logger.info(f"Initial test loss: {test_loss:.6f}")
-    else:
-        test_losses = []
-        best_test_loss = float("inf")
+        out["teacher_forced_node_losses"] = tf_losses
+        out["teacher_forced_node_loss"] = float(
+            compute_weighted_node_loss(tf_losses)
+        )
 
-    initial_node_metrics = _compute_node_metric_snapshot(
-        predictor=predictor,
-        options=options,
-        task=task,
-        sink_idx=problem.n_nodes - 1,
-    )
-
-    return {
-        "train_X": train_X,
-        "train_Y": train_Y,
-        "train_X_nn": train_X_nn,
-        "train_y_nn": train_y_nn,
-        "partial_buffers": partial_buffers,
-        "network_output_at_X": network_output_at_X,
-        "best_obs_vals": best_obs_vals,
-        "test_losses": test_losses,
-        "best_test_loss": best_test_loss,
-        "runtimes": [None],
-        "cumulative_costs": [0.0],
-        "node_selected": [None],
-        "node_input_selected": [None],     # store base_x
-        "node_eval_val": [None],
-        "acqf_val_list": [None],
-        "node_candidates": [None],
-        "node_eval_counts": torch.zeros(problem.n_nodes, dtype=torch.long),
-        "total_cost": 0.0,
-        "predictor": predictor,
-        "nn_optimizer": nn_optimizer,
-        "dkl_optimizer_state": nn_optimizer if _is_dkl_predictor(predictor) else None,
-        "node_test_losses_tf": init_node_metric_history(initial_node_metrics["teacher_forced"]),
-        "node_test_losses_rollout": init_node_metric_history(initial_node_metrics["rollout"]),
-        "weighted_node_test_losses_tf_all": init_node_metric_history(initial_node_metrics["weighted_teacher_forced_all"]),
-        "weighted_node_test_losses_tf_intermediate": init_node_metric_history(initial_node_metrics["weighted_teacher_forced_intermediate"]),
-        "weighted_node_test_losses_rollout_all": init_node_metric_history(initial_node_metrics["weighted_rollout_all"]),
-        "weighted_node_test_losses_rollout_intermediate": init_node_metric_history(initial_node_metrics["weighted_rollout_intermediate"]),
-    }
-
-
-def _resume_experiment(
-    *,
-    results_dir: str,
-    trial: int,
-    options: Dict,
-) -> Dict:
-    res = torch.load(os.path.join(results_dir, f"trial_{trial}.pt"), weights_only=False)
-
-    torch.set_rng_state(res["random_states"]["torch"])
-    np.random.set_state(res["random_states"]["numpy"])
-    random.setstate(res["random_states"]["random"])
-
-    predictor = options["predictor"]
-
-    if _is_dkl_predictor(predictor):
-        nn_optimizer = res.get("dkl_optimizer_state", None)
-        _ = load_latest_nn_checkpoint(
-            results_dir=results_dir,
-            trial=trial,
+    if "rollout_node_loss" in metrics:
+        rollout_losses = compute_rollout_node_losses(
             predictor=predictor,
-            nn_optimizer=None,
-            map_location="cpu",
+            base_X=options["test_X"],
+            full_Y=options["full_test_Y"],
+            task=task,
         )
-    else:
-        nn_optimizer = torch.optim.Adam(
-            predictor.parameters(),
-            lr=options.get("nn_lr", 1e-3),
-            weight_decay=options.get("nn_weight_decay", 1e-6),
-        )
-        _ = load_latest_nn_checkpoint(
-            results_dir=results_dir,
-            trial=trial,
-            predictor=predictor,
-            nn_optimizer=nn_optimizer,
-            map_location="cpu",
+        out["rollout_node_losses"] = rollout_losses
+        out["rollout_node_loss"] = float(
+            compute_weighted_node_loss(rollout_losses)
         )
 
-    cumulative_costs = res["cumulative_costs"]
-    total_cost = float(cumulative_costs[-1]) if len(cumulative_costs) > 0 else 0.0
-
-    _rehydrate_dkl_predictor_from_state(
-        predictor=predictor,
-        state=res,
-    )
-
-    return {
-        "train_X": res["train_X"],
-        "train_Y": res["train_Y"],
-        "train_X_nn": res.get("train_X_nn", None),
-        "train_y_nn": res.get("train_y_nn", None),
-        "partial_buffers": res.get("partial_buffers", None),
-        "network_output_at_X": res["network_output_at_X"],
-        "best_obs_vals": res.get("best_obs_vals", []),
-        "test_losses": res.get("test_losses", []),
-        "best_test_loss": res.get("best_test_loss", float("inf")),
-        "runtimes": res["runtimes"],
-        "cumulative_costs": cumulative_costs,
-        "node_selected": res["node_selected"],
-        "node_input_selected": res["node_input_selected"],
-        "node_eval_val": res["node_eval_val"],
-        "acqf_val_list": res["acqf_val_list"],
-        "node_candidates": res["node_candidates"],
-        "node_eval_counts": res["node_eval_counts"],
-        "total_cost": total_cost,
-        "predictor": predictor,
-        "nn_optimizer": nn_optimizer,
-        "dkl_optimizer_state": res.get("dkl_optimizer_state", None),
-        "node_test_losses_tf": res.get("node_test_losses_tf", {}),
-        "node_test_losses_rollout": res.get("node_test_losses_rollout", {}),
-        "weighted_node_test_losses_tf_all": res.get("weighted_node_test_losses_tf_all", {}),
-        "weighted_node_test_losses_tf_intermediate": res.get("weighted_node_test_losses_tf_intermediate", {}),
-        "weighted_node_test_losses_rollout_all": res.get("weighted_node_test_losses_rollout_all", {}),
-        "weighted_node_test_losses_rollout_intermediate": res.get("weighted_node_test_losses_rollout_intermediate", {}),
-    }
-
-
-def _save_trial_state(
-    *,
-    results_dir: str,
-    trial: int,
-    budget: Union[int, float],
-    state: Dict,
-    metrics: List[str],
-) -> None:
-    bo_results = {
-        "bo_budget": budget,
-        "runtimes": state["runtimes"],
-        "cumulative_costs": state["cumulative_costs"],
-        "node_selected": state["node_selected"],
-        "node_input_selected": state["node_input_selected"],
-        "node_eval_val": state["node_eval_val"],
-        "acqf_val_list": state["acqf_val_list"],
-        "best_obs_vals": state["best_obs_vals"],
-        "node_eval_counts": state["node_eval_counts"],
-        "node_candidates": state["node_candidates"],
-        "train_X": state["train_X"],
-        "train_Y": state["train_Y"],
-        "train_X_nn": state["train_X_nn"],
-        "train_y_nn": state["train_y_nn"],
-        "partial_buffers": state.get("partial_buffers", None),
-        "network_output_at_X": state["network_output_at_X"],
-        "dkl_optimizer_state": state.get("dkl_optimizer_state", None),
-        "random_states": {
-            "torch": torch.get_rng_state(),
-            "numpy": np.random.get_state(),
-            "random": random.getstate(),
-        },
-        "test_losses": state["test_losses"] if "test_loss" in metrics else None,
-        "best_test_loss": state["best_test_loss"] if "test_loss" in metrics else None,
-        "node_test_losses_tf": state.get("node_test_losses_tf", {}),
-        "node_test_losses_rollout": state.get("node_test_losses_rollout", {}),
-        "weighted_node_test_losses_tf_all": state.get("weighted_node_test_losses_tf_all", {}),
-        "weighted_node_test_losses_tf_intermediate": state.get("weighted_node_test_losses_tf_intermediate", {}),
-        "weighted_node_test_losses_rollout_all": state.get("weighted_node_test_losses_rollout_all", {}),
-        "weighted_node_test_losses_rollout_intermediate": state.get("weighted_node_test_losses_rollout_intermediate", {}),
-    }
-    torch.save(bo_results, os.path.join(results_dir, f"trial_{trial}.pt"))
+    return out
 
 
 def run_one_trial(
+    *,
     problem_name: str,
     problem: SyntheticTestFunction,
     algo: str,
     trial: int,
-    metrics: List[str],
+    metrics: Sequence[str],
     n_init_evals: int,
-    budget: Union[float, int],
-    options: Optional[Dict] = None,
-    force_restart: bool = False,
+    budget: Union[int, float],
+    options: Dict[str, Any],
     noisy: bool = False,
-) -> None:
-    if algo not in ["Random", "NN_UQ"]:
-        raise ValueError(f"Unsupported algo for AL-only runner: {algo}")
+) -> Dict[str, Any]:
+    """
+    Run one AL trial.
 
-    options = options or {}
+    Expected inputs in options
+    --------------------------
+    predictor:
+        Predictor object to update in place.
+    test_X, test_y:
+        Final evaluation set.
+    val_X, val_y:
+        Validation set used by the fantasy selector.
+    task:
+        "regression" or "classification"
+    """
+    start_time = time.time()
+    _set_seed(int(trial))
 
-    _prepare_test_artifacts(
-        problem=problem,
-        options=options,
-    )
+    predictor = options["predictor"]
+    task = str(options.get("task", "regression"))
+
+    _prepare_test_artifacts(problem=problem, options=options)
     _prepare_selector_holdout(options)
 
-    results_dir = _make_results_dir(problem_name, problem, algo)
-
-    if os.path.exists(os.path.join(results_dir, f"trial_{trial}.pt")) and not force_restart:
-        logger.info(
-            f"============================Resume Experiment=================================\n"
-            f"Experiment: {problem_name}_{'_'.join(str(x) for x in problem.node_costs)}\n"
-            f"Algorithm: {algo}\n"
-            f"Trial: {trial}"
-        )
-        state = _resume_experiment(
-            results_dir=results_dir,
-            trial=trial,
-            options=options,
-        )
-    else:
-        logger.info(
-            f"============================Start New Experiment=================================\n"
-            f"Experiment: {problem_name}_{'_'.join(str(x) for x in problem.node_costs)}\n"
-            f"Algorithm: {algo}\n"
-            f"Trial: {trial}"
-        )
-        state = _initialize_new_experiment(
-            problem=problem,
-            trial=trial,
-            n_init_evals=n_init_evals,
-            metrics=metrics,
-            options=options,
-            noisy=noisy,
-        )
-
-    predictor = state["predictor"]
-    nn_optimizer = state["nn_optimizer"]
-
-    test_X = options["test_X"]
-    test_y = options["test_y"]
-
-    selector_holdout_X = options["selector_holdout_X"]
-    selector_holdout_y = options["selector_holdout_y"]
-
-    task = options.get("task", "regression")
-
-    logger.info(
-        f"Selector objective: {options.get('selector_objective')} | "
-        f"selector metric: {options.get('selector_metric')} | "
-        f"selector holdout size: {selector_holdout_X.shape[0]}"
+    # --------------------------------------------------------------
+    # Initial full-network evaluations
+    # --------------------------------------------------------------
+    init_X = _draw_initial_design(
+        problem=problem,
+        n_init_evals=int(n_init_evals),
+    )
+    init_Y_full = _evaluate_problem_full(
+        problem=problem,
+        x=init_X,
     )
 
-    while state["total_cost"] < float(budget):
-        remaining_budget = float(budget) - float(state["total_cost"])
-        logger.info(f"Remaining budget: {remaining_budget}")
+    state = _init_state_from_full_evals(
+        problem=problem,
+        init_X=init_X,
+        init_Y_full=init_Y_full,
+        options=options,
+    )
 
-        t0 = time.time()
+    spent_budget = float(sum(problem.node_costs)) * float(n_init_evals)
+
+    # Initial train
+    _train_predictor_in_place(
+        predictor=predictor,
+        state=state,
+        options=options,
+        verbose=bool(options.get("verbose", False)),
+    )
+
+    history: List[Dict[str, Any]] = []
+    teacher_forced_history: Optional[Dict[int, List[float]]] = None
+    rollout_history: Optional[Dict[int, List[float]]] = None
+
+    initial_metrics = _compute_reporting_metrics(
+        predictor=predictor,
+        problem=problem,
+        options=options,
+        metrics=metrics,
+        task=task,
+        state=state,
+    )
+
+    if "teacher_forced_node_losses" in initial_metrics:
+        teacher_forced_history = init_node_metric_history(
+            initial_metrics["teacher_forced_node_losses"]
+        )
+    if "rollout_node_losses" in initial_metrics:
+        rollout_history = init_node_metric_history(
+            initial_metrics["rollout_node_losses"]
+        )
+
+    history.append(
+        {
+            "round": 0,
+            "spent_budget": float(spent_budget),
+            "remaining_budget": float(max(float(budget) - spent_budget, 0.0)),
+            "selected_node": None,
+            "selection_info": None,
+            **{
+                k: v
+                for k, v in initial_metrics.items()
+                if not k.endswith("_losses")
+            },
+        }
+    )
+
+    logger.info(
+        f"[trial={trial}] init done | spent_budget={spent_budget:.3f} "
+        f"| metrics={ {k: v for k, v in initial_metrics.items() if not k.endswith('_losses')} }"
+    )
+
+    # --------------------------------------------------------------
+    # Active learning loop
+    # --------------------------------------------------------------
+    round_idx = 0
+    while spent_budget < float(budget):
+        remaining_budget = float(budget) - spent_budget
+
         base_x, eval_x, new_node, acq_val, node_candidate = get_suggested_node_and_input(
             algo=algo,
             remaining_budget=remaining_budget,
@@ -573,188 +474,131 @@ def run_one_trial(
             options=options,
             state=state,
         )
-        t1 = time.time()
-        logger.info(f"Optimizing the acquisition takes {t1 - t0:.4f} seconds")
 
-        if new_node is None:
-            eval_cost = effective_group_cost(problem, list(range(problem.n_nodes)))
-        else:
-            eval_cost = effective_group_cost(problem, new_node)
-
-        if state["total_cost"] + eval_cost > float(budget):
-            logger.info("Next evaluation would exceed budget. Stopping.")
+        obs_cost = _group_or_full_cost(
+            problem=problem,
+            new_node=new_node,
+        )
+        if obs_cost > remaining_budget:
+            logger.info(
+                f"[trial={trial}] stopping: selected action cost={obs_cost:.3f} "
+                f"exceeds remaining_budget={remaining_budget:.3f}"
+            )
             break
 
-        # IMPORTANT: evaluate with node-specific input eval_x
-        new_y = problem.evaluate(X=eval_x, idx=new_node)
-        if noisy:
-            new_y = new_y + torch.normal(0, 1, size=new_y.shape)
-
         if new_node is None:
-            logger.info(
-                f"Evaluate the full network at base input {base_x} "
-                f"(eval input {eval_x}) "
-                f"(acqf val: {'N/A' if algo == 'Random' else f'{float(acq_val):.4f}'}): {new_y}"
-            )
-
-            state["total_cost"] += eval_cost
-
-            # IMPORTANT: store base_x in buffers, not eval_x
-            evaluated_nodes = append_partial_observation(
+            new_y = _evaluate_problem_full(
                 problem=problem,
-                base_x=base_x,
-                eval_x=eval_x,
-                new_y=new_y,
-                new_node=new_node,
-                state=state,
+                x=eval_x,
             )
         else:
-            selected_group_idx = None
-            if isinstance(node_candidate, dict):
-                selected_group_idx = node_candidate.get("selected_group_idx", None)
-
-            selected_score = float("nan")
-            if selected_group_idx is not None and torch.is_tensor(acq_val):
-                selected_score = float(acq_val[selected_group_idx].item())
-
-            logger.info(
-                f"Evaluate at node {new_node} with base input {base_x} "
-                f"and eval input {eval_x} "
-                f"(effective cost: {eval_cost:.4f}, acqf val (over cost): {selected_score:.4f}): {new_y}"
-            )
-
-            if isinstance(node_candidate, dict):
-                logger.info(
-                    f"[runner] selected_stage={node_candidate.get('selected_stage')}, "
-                    f"stage_uncertainty={node_candidate.get('stage_uncertainty')}"
-                )
-                logger.info(
-                    f"[runner] group_max_uncertainty={node_candidate.get('group_max_uncertainty')}"
-                )
-                logger.info(
-                    f"[runner] group_max_uncertainty_over_cost="
-                    f"{node_candidate.get('group_max_uncertainty_over_cost')}"
-                )
-
-            state["total_cost"] += eval_cost
-
-            # IMPORTANT: store base_x in buffers, not eval_x
-            evaluated_nodes = append_partial_observation(
+            new_y = _evaluate_problem_partial(
                 problem=problem,
-                base_x=base_x,
                 eval_x=eval_x,
-                new_y=new_y,
                 new_node=new_node,
-                state=state,
             )
 
-        # Retrain after both full and partial observations
-        maybe_optimizer = train_predictor_partial_backend(
-            predictor=predictor,
-            train_X_nodes=state["train_X"],
-            train_Y_nodes=state["train_Y"],
-            options=options,
-            sink_idx=problem.n_nodes - 1,
-            optimizer=nn_optimizer,
-        )
-
-        if maybe_optimizer is not None:
-            nn_optimizer = maybe_optimizer
-
-        state["nn_optimizer"] = nn_optimizer
-        if _is_dkl_predictor(predictor):
-            state["dkl_optimizer_state"] = nn_optimizer
-        else:
-            state["dkl_optimizer_state"] = None
-
-        if "obs_val" in metrics and state["train_y_nn"] is not None and state["train_y_nn"].shape[0] > 0:
-            best_obs_val = float(state["train_y_nn"].max().item())
-            state["best_obs_vals"].append(best_obs_val)
-
-        if "test_loss" in metrics:
-            test_loss = compute_test_loss(
-                predictor=predictor,
-                test_X=test_X,
-                test_y=test_y,
-                task=task,
-            )
-            state["test_losses"].append(test_loss)
-            state["best_test_loss"] = min(state["best_test_loss"], test_loss)
-            logger.info(
-                f"Test loss: {test_loss:.6f} "
-                f"(best {state['best_test_loss']:.6f})"
-            )
-
-        node_metric_snapshot = _compute_node_metric_snapshot(
-            predictor=predictor,
-            options=options,
-            task=task,
-            sink_idx=problem.n_nodes - 1,
-        )
-
-        state["node_test_losses_tf"] = append_node_metric_history(
-            state.get("node_test_losses_tf", {}),
-            node_metric_snapshot["teacher_forced"],
-        )
-        state["node_test_losses_rollout"] = append_node_metric_history(
-            state.get("node_test_losses_rollout", {}),
-            node_metric_snapshot["rollout"],
-        )
-        state["weighted_node_test_losses_tf_all"] = append_node_metric_history(
-            state.get("weighted_node_test_losses_tf_all", {}),
-            node_metric_snapshot["weighted_teacher_forced_all"],
-        )
-        state["weighted_node_test_losses_tf_intermediate"] = append_node_metric_history(
-            state.get("weighted_node_test_losses_tf_intermediate", {}),
-            node_metric_snapshot["weighted_teacher_forced_intermediate"],
-        )
-        state["weighted_node_test_losses_rollout_all"] = append_node_metric_history(
-            state.get("weighted_node_test_losses_rollout_all", {}),
-            node_metric_snapshot["weighted_rollout_all"],
-        )
-        state["weighted_node_test_losses_rollout_intermediate"] = append_node_metric_history(
-            state.get("weighted_node_test_losses_rollout_intermediate", {}),
-            node_metric_snapshot["weighted_rollout_intermediate"],
-        )
-
-        tf_str = ", ".join(
-            [f"node{j}={v:.4f}" for j, v in sorted(node_metric_snapshot["teacher_forced"].items())]
-        )
-        ro_str = ", ".join(
-            [f"node{j}={v:.4f}" for j, v in sorted(node_metric_snapshot["rollout"].items())]
-        )
-
-        logger.info(f"Teacher-forced node losses: {tf_str}")
-        logger.info(f"Rollout node losses      : {ro_str}")
-
-        logger.info(f"total cost used: {state['total_cost']}")
-        logger.info("==========================================================================")
-
-        state["runtimes"].append(t1 - t0)
-        state["cumulative_costs"].append(float(state["total_cost"]))
-        state["node_selected"].append(evaluated_nodes)
-        state["node_input_selected"].append(base_x)   # store external input
-        state["node_eval_val"].append(new_y)
-        state["acqf_val_list"].append(acq_val)
-        state["node_candidates"].append(node_candidate)
-
-        step = len(state["cumulative_costs"]) - 1
-        save_nn_checkpoint(
-            results_dir=results_dir,
-            trial=trial,
-            step=step,
-            predictor=predictor,
-            nn_optimizer=nn_optimizer if _is_torch_optimizer(nn_optimizer) else None,
-            extra={
-                "total_cost": float(state["total_cost"]),
-                "budget": float(budget),
-            },
-        )
-
-        _save_trial_state(
-            results_dir=results_dir,
-            trial=trial,
-            budget=budget,
+        observed_nodes = _append_observation(
+            problem=problem,
             state=state,
-            metrics=metrics,
+            base_x=base_x,
+            eval_x=eval_x,
+            new_y=new_y,
+            new_node=new_node,
         )
+
+        _train_predictor_in_place(
+            predictor=predictor,
+            state=state,
+            options=options,
+            verbose=False,
+        )
+
+        spent_budget += obs_cost
+        round_idx += 1
+
+        metric_values = _compute_reporting_metrics(
+            predictor=predictor,
+            problem=problem,
+            options=options,
+            metrics=metrics,
+            task=task,
+            state=state,
+        )
+
+        if "teacher_forced_node_losses" in metric_values:
+            if teacher_forced_history is None:
+                teacher_forced_history = init_node_metric_history(
+                    metric_values["teacher_forced_node_losses"]
+                )
+            else:
+                teacher_forced_history = append_node_metric_history(
+                    teacher_forced_history,
+                    metric_values["teacher_forced_node_losses"],
+                )
+
+        if "rollout_node_losses" in metric_values:
+            if rollout_history is None:
+                rollout_history = init_node_metric_history(
+                    metric_values["rollout_node_losses"]
+                )
+            else:
+                rollout_history = append_node_metric_history(
+                    rollout_history,
+                    metric_values["rollout_node_losses"],
+                )
+
+        step_info = {
+            "round": int(round_idx),
+            "spent_budget": float(spent_budget),
+            "remaining_budget": float(max(float(budget) - spent_budget, 0.0)),
+            "selected_node": None if new_node is None else list(new_node),
+            "observed_nodes": list(observed_nodes),
+            "obs_cost": float(obs_cost),
+            "acq_val": (
+                None
+                if acq_val is None
+                else (
+                    float(acq_val.max().item())
+                    if torch.is_tensor(acq_val)
+                    else float(acq_val)
+                )
+            ),
+            "selection_info": node_candidate,
+            **{
+                k: v
+                for k, v in metric_values.items()
+                if not k.endswith("_losses")
+            },
+        }
+        history.append(step_info)
+
+        logger.info(
+            f"[trial={trial}] round={round_idx} "
+            f"| selected_node={step_info['selected_node']} "
+            f"| obs_cost={obs_cost:.3f} "
+            f"| spent_budget={spent_budget:.3f} "
+            f"| remaining_budget={max(float(budget) - spent_budget, 0.0):.3f}"
+        )
+
+    elapsed = time.time() - start_time
+
+    result = {
+        "problem_name": problem_name,
+        "trial": int(trial),
+        "algo": str(algo),
+        "noisy": bool(noisy),
+        "budget": float(budget),
+        "spent_budget": float(spent_budget),
+        "elapsed_seconds": float(elapsed),
+        "history": history,
+        "state": state,
+        "predictor": predictor,
+    }
+
+    if teacher_forced_history is not None:
+        result["teacher_forced_history"] = teacher_forced_history
+    if rollout_history is not None:
+        result["rollout_history"] = rollout_history
+
+    return result
