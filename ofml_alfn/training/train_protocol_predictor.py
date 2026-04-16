@@ -35,10 +35,8 @@ def _normalize_protocol_map(
         protocol_map = dict(protocols)
     else:
         protocol_map = {p.protocol_id: p for p in protocols}
-
     if not protocol_map:
         raise ValueError("protocols must be non-empty")
-
     return protocol_map
 
 
@@ -64,14 +62,11 @@ def _stack_target_tensor(
         if not torch.is_tensor(value):
             value = torch.as_tensor(value, dtype=torch.float32)
         value = value.detach().to(dtype=torch.float32, device=device)
-
         if value.ndim == 0:
             value = value.unsqueeze(0)
         elif value.ndim > 1:
             value = value.reshape(-1)
-
         rows.append(value)
-
     return torch.stack(rows, dim=0)
 
 
@@ -83,7 +78,7 @@ def _extract_prediction_tensor(
 ) -> torch.Tensor:
     """
     Accept several output shapes so this trainer stays decoupled from the exact
-    implementation of protocol_predictor.py.
+    implementation of protocol_predictor.py or any custom predictor adapter.
 
     Supported forms
     ---------------
@@ -99,17 +94,17 @@ def _extract_prediction_tensor(
        - .prediction
        - .pred
        - .target_value
+       - .mean
     """
     candidate = pred_obj
 
     if isinstance(candidate, Mapping):
-        for key in ("target", "target_pred", "prediction", "pred"):
+        for key in ("target", "target_pred", "prediction", "pred", "mean"):
             if key in candidate:
                 candidate = candidate[key]
                 break
-
     elif not torch.is_tensor(candidate):
-        for attr in ("target", "target_pred", "prediction", "pred", "target_value"):
+        for attr in ("target", "target_pred", "prediction", "pred", "target_value", "mean"):
             if hasattr(candidate, attr):
                 candidate = getattr(candidate, attr)
                 break
@@ -121,12 +116,10 @@ def _extract_prediction_tensor(
         )
 
     candidate = candidate.to(dtype=torch.float32, device=device)
-
     if candidate.ndim == 0:
         candidate = candidate.view(1, 1)
     elif candidate.ndim == 1:
         candidate = candidate.unsqueeze(-1)
-
     return candidate
 
 
@@ -138,8 +131,8 @@ def _predict_target_batch(
     device: torch.device,
 ) -> torch.Tensor:
     """
-    Try several interfaces so the trainer remains usable while
-    protocol_predictor.py is still evolving.
+    Try several interfaces so the trainer remains usable while predictor
+    implementations evolve.
 
     Expected preferred interfaces
     -----------------------------
@@ -151,26 +144,34 @@ def _predict_target_batch(
     if hasattr(predictor, "forward_target"):
         pred_obj = predictor.forward_target(protocol=protocol, condition_x=condition_x)
         return _extract_prediction_tensor(
-            pred_obj, device=device, protocol_id=protocol.protocol_id
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
         )
 
     if hasattr(predictor, "forward_protocol"):
         pred_obj = predictor.forward_protocol(protocol=protocol, condition_x=condition_x)
         return _extract_prediction_tensor(
-            pred_obj, device=device, protocol_id=protocol.protocol_id
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
         )
 
     try:
         pred_obj = predictor(protocol=protocol, condition_x=condition_x)
         return _extract_prediction_tensor(
-            pred_obj, device=device, protocol_id=protocol.protocol_id
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
         )
     except TypeError:
         pass
 
     pred_obj = predictor(protocol, condition_x)
     return _extract_prediction_tensor(
-        pred_obj, device=device, protocol_id=protocol.protocol_id
+        pred_obj,
+        device=device,
+        protocol_id=protocol.protocol_id,
     )
 
 
@@ -209,7 +210,6 @@ def _compute_batch_loss(
         protocol = protocol_map[protocol_id]
         x = _stack_condition_tensor(samples_this_protocol, protocol, device=device)
         y = _stack_target_tensor(samples_this_protocol, device=device)
-
         pred = _predict_target_batch(
             predictor,
             protocol=protocol,
@@ -237,12 +237,7 @@ def _compute_batch_loss(
 
         weight = float(protocol_loss_weights.get(protocol_id, 1.0))
         weighted_loss_this = weight * loss_this
-
-        total_loss = (
-            weighted_loss_this
-            if total_loss is None
-            else total_loss + weighted_loss_this
-        )
+        total_loss = weighted_loss_this if total_loss is None else total_loss + weighted_loss_this
         total_weight += weight
 
         metrics[f"loss/{protocol_id}"] = float(loss_this.detach().cpu().item())
@@ -267,7 +262,6 @@ def _sample_minibatch(
     n = len(samples)
     if n == 0:
         raise ValueError("Cannot sample minibatch from an empty sample list")
-
     if batch_size >= n:
         return list(samples)
 
@@ -280,6 +274,109 @@ def _sample_minibatch(
     return [samples[i] for i in idx]
 
 
+def _predictor_type(predictor: nn.Module) -> str:
+    return str(getattr(predictor, "predictor_type", "generic")).lower()
+
+
+def _call_custom_protocol_evaluator(
+    predictor: nn.Module,
+    *,
+    protocols: Mapping[str, ProtocolSpec],
+    samples: Sequence[BenchmarkSample],
+    config: "ProtocolTrainingConfig",
+) -> Optional["ProtocolEvaluationResult"]:
+    """
+    Optional predictor-specific evaluation hook.
+
+    Accepted predictor methods
+    --------------------------
+    - predictor.evaluate_protocol_dataset(...)
+    - predictor.evaluate_protocol_predictor(...)
+
+    Accepted return forms
+    ---------------------
+    - ProtocolEvaluationResult
+    - dict with keys: loss, loss_by_protocol, n_by_protocol, n_total
+    """
+    for method_name in ("evaluate_protocol_dataset", "evaluate_protocol_predictor"):
+        method = getattr(predictor, method_name, None)
+        if callable(method):
+            out = method(
+                protocols=protocols,
+                samples=samples,
+                config=config,
+            )
+            if isinstance(out, ProtocolEvaluationResult):
+                return out
+            if isinstance(out, Mapping):
+                return ProtocolEvaluationResult(
+                    loss=float(out["loss"]),
+                    loss_by_protocol=dict(out.get("loss_by_protocol", {})),
+                    n_by_protocol={k: int(v) for k, v in out.get("n_by_protocol", {}).items()},
+                    n_total=int(out.get("n_total", len(samples))),
+                )
+            raise TypeError(
+                f"Custom evaluator {method_name} returned unsupported type {type(out)}"
+            )
+    return None
+
+
+def _call_custom_protocol_trainer(
+    predictor: nn.Module,
+    *,
+    protocols: Mapping[str, ProtocolSpec],
+    train_samples: Sequence[BenchmarkSample],
+    val_samples: Optional[Sequence[BenchmarkSample]],
+    config: "ProtocolTrainingConfig",
+    optimizer: Optional[torch.optim.Optimizer],
+) -> Optional["ProtocolTrainingResult"]:
+    """
+    Optional predictor-specific training hook.
+
+    Accepted predictor methods
+    --------------------------
+    - predictor.fit_protocol_dataset(...)
+    - predictor.train_protocol_dataset(...)
+
+    Accepted return forms
+    ---------------------
+    - ProtocolTrainingResult
+    - dict with keys compatible with ProtocolTrainingResult
+    """
+    for method_name in ("fit_protocol_dataset", "train_protocol_dataset"):
+        method = getattr(predictor, method_name, None)
+        if callable(method):
+            out = method(
+                protocols=protocols,
+                train_samples=train_samples,
+                val_samples=val_samples,
+                config=config,
+                optimizer=optimizer,
+            )
+            if isinstance(out, ProtocolTrainingResult):
+                return out
+            if isinstance(out, Mapping):
+                return ProtocolTrainingResult(
+                    optimizer=out.get("optimizer", optimizer),
+                    history=list(out.get("history", [])),
+                    best_step=int(out.get("best_step", -1)),
+                    best_val_loss=(
+                        None if out.get("best_val_loss", None) is None
+                        else float(out["best_val_loss"])
+                    ),
+                    final_train_loss=float(out.get("final_train_loss", float("nan"))),
+                    final_val_loss=(
+                        None if out.get("final_val_loss", None) is None
+                        else float(out["final_val_loss"])
+                    ),
+                    best_state_dict=out.get("best_state_dict", None),
+                )
+            raise TypeError(
+                f"Custom trainer {method_name} returned unsupported type {type(out)}"
+            )
+    return None
+
+
 @dataclass(frozen=True)
 class ProtocolTrainingConfig:
     n_steps: int = 500
@@ -288,13 +385,10 @@ class ProtocolTrainingConfig:
     weight_decay: float = 1e-6
     loss_name: str = "mse"
     grad_clip_norm: Optional[float] = None
-
     val_every: int = 25
     early_stopping_patience: Optional[int] = 20
     early_stopping_min_delta: float = 0.0
-
     protocol_loss_weights: Dict[str, float] = field(default_factory=dict)
-
     seed: int = 0
     device: Optional[str] = None
     verbose: bool = False
@@ -313,7 +407,7 @@ class ProtocolEvaluationResult:
 
 @dataclass
 class ProtocolTrainingResult:
-    optimizer: torch.optim.Optimizer
+    optimizer: Optional[torch.optim.Optimizer]
     history: List[Dict[str, float]]
     best_step: int
     best_val_loss: Optional[float]
@@ -328,11 +422,10 @@ def make_optimizer(
     lr: float = 1e-3,
     weight_decay: float = 1e-6,
 ) -> torch.optim.Optimizer:
-    return torch.optim.Adam(
-        predictor.parameters(),
-        lr=lr,
-        weight_decay=weight_decay,
-    )
+    params = [p for p in predictor.parameters() if p.requires_grad]
+    if len(params) == 0:
+        raise ValueError("predictor has no trainable parameters")
+    return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
 
 
 @torch.no_grad()
@@ -353,14 +446,30 @@ def evaluate_protocol_predictor(
 
     protocol_map = _normalize_protocol_map(protocols)
     config = ProtocolTrainingConfig() if config is None else config
-    device = _infer_device(predictor, config.torch_device())
 
+    custom_eval = _call_custom_protocol_evaluator(
+        predictor,
+        protocols=protocol_map,
+        samples=samples,
+        config=config,
+    )
+    if custom_eval is not None:
+        return custom_eval
+
+    if _predictor_type(predictor) == "dkl":
+        raise NotImplementedError(
+            "predictor_type='dkl' requires a predictor-specific evaluation hook "
+            "(evaluate_protocol_dataset or evaluate_protocol_predictor). "
+            "The generic tensor-loss evaluator is not sufficient for the current DKL backend."
+        )
+
+    device = _infer_device(predictor, config.torch_device())
     predictor.eval()
 
     grouped = _group_samples_by_protocol(samples)
+
     loss_by_protocol: Dict[str, float] = {}
     n_by_protocol: Dict[str, int] = {}
-
     total_weighted_loss = 0.0
     total_count = 0
 
@@ -395,7 +504,6 @@ def evaluate_protocol_predictor(
 
         n_this = len(samples_this_protocol)
         loss_val = float(loss_this.detach().cpu().item())
-
         loss_by_protocol[protocol_id] = loss_val
         n_by_protocol[protocol_id] = n_this
 
@@ -434,17 +542,43 @@ def train_protocol_predictor(
         predictor(protocol_spec, x)
 
     The returned object may be:
-        - a tensor
-        - a dict containing "target", "target_pred", "prediction", or "pred"
-        - an object exposing one of those attributes
+    - a tensor
+    - a dict containing "target", "target_pred", "prediction", or "pred"
+    - an object exposing one of those attributes
+
+    Predictor-specific hook path
+    ----------------------------
+    If the predictor implements either:
+      - fit_protocol_dataset(...)
+      - train_protocol_dataset(...)
+    this function will delegate to that method. This is the intended route for
+    DKL-like predictors that need specialized fitting logic.
     """
     if len(train_samples) == 0:
         raise ValueError("train_samples must be non-empty")
 
     protocol_map = _normalize_protocol_map(protocols)
     config = ProtocolTrainingConfig() if config is None else config
-    device = _infer_device(predictor, config.torch_device())
 
+    custom_train = _call_custom_protocol_trainer(
+        predictor,
+        protocols=protocol_map,
+        train_samples=train_samples,
+        val_samples=val_samples,
+        config=config,
+        optimizer=optimizer,
+    )
+    if custom_train is not None:
+        return custom_train
+
+    if _predictor_type(predictor) == "dkl":
+        raise NotImplementedError(
+            "predictor_type='dkl' requires a predictor-specific training hook "
+            "(fit_protocol_dataset or train_protocol_dataset). "
+            "The generic gradient loop is not sufficient for the current DKL backend."
+        )
+
+    device = _infer_device(predictor, config.torch_device())
     predictor.to(device)
     predictor.train()
 
@@ -518,6 +652,7 @@ def train_protocol_predictor(
             )
             last_val_loss = float(val_result.loss)
             row["val_loss"] = last_val_loss
+
             for protocol_id, loss_val in val_result.loss_by_protocol.items():
                 row[f"val_loss/{protocol_id}"] = float(loss_val)
 
@@ -525,6 +660,7 @@ def train_protocol_predictor(
                 best_val_loss is None
                 or last_val_loss < best_val_loss - float(config.early_stopping_min_delta)
             )
+
             if improved:
                 best_val_loss = last_val_loss
                 best_step = step

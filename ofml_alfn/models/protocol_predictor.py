@@ -15,19 +15,27 @@ from ofml_alfn.utils.protocol_types import (
 )
 
 
-def _as_module_dict(modules: Mapping[str, nn.Module] | nn.ModuleDict) -> nn.ModuleDict:
+def _as_module_dict(
+    modules: Mapping[str, nn.Module] | nn.ModuleDict,
+) -> nn.ModuleDict:
     if isinstance(modules, nn.ModuleDict):
+        if len(modules) == 0:
+            raise ValueError("Module registry must be non-empty")
         return modules
 
     out = nn.ModuleDict()
     for key, module in modules.items():
         if not isinstance(key, str) or not key.strip():
-            raise ValueError(f"Module registry keys must be non-empty strings, got {key!r}")
+            raise ValueError(
+                f"Module registry keys must be non-empty strings, got {key!r}"
+            )
         if not isinstance(module, nn.Module):
             raise TypeError(
-                f"Module registry values must be nn.Module instances, got {type(module)} for key {key!r}"
+                f"Module registry values must be nn.Module instances, "
+                f"got {type(module)} for key {key!r}"
             )
         out[key] = module
+
     if len(out) == 0:
         raise ValueError("Module registry must be non-empty")
     return out
@@ -60,7 +68,9 @@ def _to_2d_tensor(
         x = x.unsqueeze(0)
 
     if x.ndim != 2:
-        raise ValueError(f"Expected a 2D tensor after normalization, got shape {tuple(x.shape)}")
+        raise ValueError(
+            f"Expected a 2D tensor after normalization, got shape {tuple(x.shape)}"
+        )
     return x
 
 
@@ -80,15 +90,15 @@ def _extract_process_output_dict(
     1. dict[str, Tensor-like]
     2. Tensor-like
        - if len(output_keys) == 1: mapped to that single key
-       - if len(output_keys) > 1 and last dim matches len(output_keys):
-         split column-wise
+       - if len(output_keys) > 1 and last dim matches len(output_keys): split column-wise
     """
     if isinstance(output_obj, Mapping):
         out: Dict[str, torch.Tensor] = {}
         missing = [k for k in process.output_keys if k not in output_obj]
         if missing:
             raise KeyError(
-                f"Process {process.process_id!r} returned a dict missing required output keys: {missing}"
+                f"Process {process.process_id!r} returned a dict missing "
+                f"required output keys: {missing}"
             )
 
         for key in process.output_keys:
@@ -98,8 +108,8 @@ def _extract_process_output_dict(
                     tensor = tensor.expand(batch_size, *tensor.shape[1:])
                 else:
                     raise ValueError(
-                        f"Output for key {key!r} in process {process.process_id!r} has "
-                        f"batch size {tensor.shape[0]}, expected {batch_size}"
+                        f"Output for key {key!r} in process {process.process_id!r} "
+                        f"has batch size {tensor.shape[0]}, expected {batch_size}"
                     )
             out[key] = tensor
         return out
@@ -110,8 +120,8 @@ def _extract_process_output_dict(
             tensor = tensor.expand(batch_size, *tensor.shape[1:])
         else:
             raise ValueError(
-                f"Process {process.process_id!r} returned batch size {tensor.shape[0]}, "
-                f"expected {batch_size}"
+                f"Process {process.process_id!r} returned batch size "
+                f"{tensor.shape[0]}, expected {batch_size}"
             )
 
     if len(process.output_keys) == 1:
@@ -168,9 +178,9 @@ class ProtocolPredictor(nn.Module):
     Accepted fallbacks:
         module.forward(
             process=process,
-            inputs=input_dict,
+            inputs=inputs,
             condition_x=condition_x,
-            process_outputs=all_previous_outputs,
+            process_outputs=process_outputs,
         )
         module(process=..., inputs=..., condition_x=..., process_outputs=...)
         module(inputs)
@@ -196,6 +206,7 @@ class ProtocolPredictor(nn.Module):
         self.modules_by_key = _as_module_dict(modules)
         self.default_dtype = dtype
         self.strict_registry = bool(strict_registry)
+        self.predictor_type = "mcd"
 
     def list_module_keys(self) -> Tuple[str, ...]:
         return tuple(self.modules_by_key.keys())
@@ -208,8 +219,8 @@ class ProtocolPredictor(nn.Module):
         if key not in self.modules_by_key:
             available = sorted(self.modules_by_key.keys())
             raise KeyError(
-                f"No module found for process {process.process_id!r} with module_key={key!r}. "
-                f"Available keys: {available}"
+                f"No module found for process {process.process_id!r} "
+                f"with module_key={key!r}. Available keys: {available}"
             )
         return self.modules_by_key[key]
 
@@ -224,9 +235,11 @@ class ProtocolPredictor(nn.Module):
         x = _to_2d_tensor(condition_x, dtype=dtype, device=device)
         if x.shape[1] != len(protocol.condition_keys):
             raise ValueError(
-                f"Protocol {protocol.protocol_id!r} expects {len(protocol.condition_keys)} "
-                f"condition features, got input shape {tuple(x.shape)}"
+                f"Protocol {protocol.protocol_id!r} expects "
+                f"{len(protocol.condition_keys)} condition features, "
+                f"got input shape {tuple(x.shape)}"
             )
+
         return {
             key: x[:, i : i + 1]
             for i, key in enumerate(protocol.condition_keys)
@@ -256,9 +269,11 @@ class ProtocolPredictor(nn.Module):
 
             if not found:
                 raise KeyError(
-                    f"Could not resolve input key {key!r} for process {process.process_id!r}. "
-                    f"Checked protocol inputs and parent outputs from {process.parent_ids}."
+                    f"Could not resolve input key {key!r} for process "
+                    f"{process.process_id!r}. Checked protocol inputs and "
+                    f"parent outputs from {process.parent_ids}."
                 )
+
         return inputs
 
     def _call_process_module(
@@ -309,12 +324,16 @@ class ProtocolPredictor(nn.Module):
 
         device = _infer_device_from_module(self)
         dtype = self.default_dtype
-
         x = _to_2d_tensor(condition_x, dtype=dtype, device=device)
-        protocol_inputs = self._stack_protocol_inputs(protocol, x, dtype=dtype, device=device)
 
+        protocol_inputs = self._stack_protocol_inputs(
+            protocol,
+            x,
+            dtype=dtype,
+            device=device,
+        )
         process_outputs: Dict[str, Dict[str, torch.Tensor]] = {}
-        records: list[ProcessExecutionRecord] = []
+        records: List[ProcessExecutionRecord] = []
 
         for process_id in protocol.topological_order():
             process = protocol.get_process(process_id)
@@ -341,6 +360,7 @@ class ProtocolPredictor(nn.Module):
                 condition_x=x,
                 process_outputs=process_outputs,
             )
+
             output_dict = _extract_process_output_dict(
                 output_obj,
                 process=process,
@@ -348,37 +368,43 @@ class ProtocolPredictor(nn.Module):
                 dtype=dtype,
                 device=device,
             )
-
             process_outputs[process.process_id] = output_dict
 
             if return_trace:
-                record = ProcessExecutionRecord(
-                    process_id=process.process_id,
-                    process_type=process.process_type,
-                    inputs={k: v.detach().cpu() for k, v in inputs.items()},
-                    outputs={k: v.detach().cpu() for k, v in output_dict.items()},
-                    success=True,
-                    message="ok",
-                    metadata={
-                        "module_key": process.module_key,
-                        "role": process.role,
-                    },
+                records.append(
+                    ProcessExecutionRecord(
+                        process_id=process.process_id,
+                        process_type=process.process_type,
+                        inputs={k: v.detach().cpu() for k, v in inputs.items()},
+                        outputs={k: v.detach().cpu() for k, v in output_dict.items()},
+                        success=True,
+                        message="ok",
+                        metadata={
+                            "module_key": process.module_key,
+                            "role": process.role,
+                        },
+                    )
                 )
-                records.append(record)
 
         target_proc_id = protocol.target_process_id
         target_key = protocol.target_output_key
 
         if target_proc_id not in process_outputs:
             raise KeyError(
-                f"Target process {target_proc_id!r} was not executed for protocol {protocol.protocol_id!r}"
+                f"Target process {target_proc_id!r} was not executed for "
+                f"protocol {protocol.protocol_id!r}"
             )
         if target_key not in process_outputs[target_proc_id]:
             raise KeyError(
-                f"Target output key {target_key!r} missing from process {target_proc_id!r}"
+                f"Target output key {target_key!r} missing from process "
+                f"{target_proc_id!r}"
             )
 
         target = process_outputs[target_proc_id][target_key]
+
+        if not return_trace:
+            return target
+
         final_outputs = {
             f"{pid}.{k}": v
             for pid, out_dict in process_outputs.items()
@@ -398,14 +424,13 @@ class ProtocolPredictor(nn.Module):
             },
         )
 
-        result = ProtocolForwardResult(
+        return ProtocolForwardResult(
             protocol_id=protocol.protocol_id,
             target=target,
             trace=trace,
             process_outputs=process_outputs,
             final_outputs=final_outputs,
         )
-        return result
 
     def forward_target(
         self,
@@ -413,16 +438,45 @@ class ProtocolPredictor(nn.Module):
         protocol: ProtocolSpec,
         condition_x: torch.Tensor,
     ) -> torch.Tensor:
-        result = self.forward_protocol(
+        out = self.forward_protocol(
             protocol=protocol,
             condition_x=condition_x,
             return_trace=False,
         )
-        if isinstance(result, ProtocolForwardResult):
-            return result.target
-        if not torch.is_tensor(result):
-            raise TypeError(f"Unexpected return type from forward_protocol: {type(result)}")
-        return result
+        if not torch.is_tensor(out):
+            raise TypeError(
+                f"Expected tensor from forward_protocol(..., return_trace=False), "
+                f"got {type(out)}"
+            )
+        return out
+
+    @torch.no_grad()
+    def sample_protocol_fantasy_targets(
+        self,
+        *,
+        protocol: ProtocolSpec,
+        condition_x: torch.Tensor,
+        n_fantasies: int,
+    ) -> torch.Tensor:
+        if n_fantasies <= 0:
+            raise ValueError(f"n_fantasies must be positive, got {n_fantasies}")
+
+        was_training = self.training
+        self.train()
+
+        samples = []
+        for _ in range(int(n_fantasies)):
+            y = self.forward_target(protocol=protocol, condition_x=condition_x)
+            if y.ndim == 0:
+                y = y.view(1, 1)
+            elif y.ndim == 1:
+                y = y.unsqueeze(-1)
+            samples.append(y.detach())
+
+        if not was_training:
+            self.eval()
+
+        return torch.stack(samples, dim=0)
 
     def forward(
         self,

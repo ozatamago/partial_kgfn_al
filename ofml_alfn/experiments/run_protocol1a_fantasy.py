@@ -5,9 +5,9 @@ import argparse
 import json
 import logging
 import random
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
 
@@ -25,6 +25,8 @@ from ofml_alfn.runners.active_learning_runner import (
 )
 from ofml_alfn.training.train_protocol_predictor import ProtocolTrainingConfig
 from ofml_alfn.utils.protocol_types import BenchmarkSample
+from ofml_alfn.models.model_factory import build_predictor
+from ofml_alfn.models.nodewise_dkl import MultiHeadNodewiseDKL
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +68,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--latent_dim", type=int, default=4)
     parser.add_argument("--output_dim", type=int, default=1)
 
+    # Common model size
     parser.add_argument("--hidden_dim", type=int, default=64)
     parser.add_argument("--depth", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
+
+    # Backend selection
+    parser.add_argument("--predictor_type", type=str, default="mcd", choices=["mcd", "dkl"])
+
+    # DKL-specific
+    parser.add_argument("--dkl_hidden", type=int, default=256)
+    parser.add_argument("--dkl_feature_dim", type=int, default=32)
+    parser.add_argument("--dkl_kernel", type=str, default="rbf", choices=["rbf", "matern"])
+    parser.add_argument("--dkl_inference", type=str, default="exact", choices=["exact", "svdkl"])
+    parser.add_argument("--dkl_noise", type=float, default=1e-4)
 
     parser.add_argument("--outer_train_steps", type=int, default=500)
     parser.add_argument("--outer_batch_size", type=int, default=64)
@@ -112,7 +125,7 @@ def _split_initial_and_pool(
     return ordered[:n_init], ordered[n_init:]
 
 
-def _build_predictor_for_problem1a(
+def _build_problem1a_mcd_predictor(
     *,
     build_result: Problem1ADatasetBuildResult,
     hidden_dim: int,
@@ -143,6 +156,72 @@ def _build_predictor_for_problem1a(
     )
     return predictor
 
+@dataclass(frozen=True)
+class _Problem1AGraphAdapter:
+    dim: int
+    n_nodes: int
+    parent_nodes: List[List[int]]
+    active_input_indices: List[List[int]]
+
+
+def _make_problem1a_graph_adapter(
+    build_result: Problem1ADatasetBuildResult,
+) -> _Problem1AGraphAdapter:
+    benchmark = build_result.benchmark
+    target_protocol = benchmark.target_protocol
+
+    # Problem 1A is always a 2-process graph:
+    # S1: shared upstream, takes all external inputs
+    # S2: observer, takes only the upstream output z
+    n_cond = len(target_protocol.condition_keys)
+
+    return _Problem1AGraphAdapter(
+        dim=n_cond,
+        n_nodes=2,
+        parent_nodes=[[], [0]],
+        active_input_indices=[list(range(n_cond)), []],
+    )
+
+def _build_predictor_factory(
+    *,
+    build_result: Problem1ADatasetBuildResult,
+    args: argparse.Namespace,
+    device: torch.device,
+):
+    predictor_type = str(args.predictor_type).lower()
+
+    if predictor_type == "mcd":
+        def predictor_factory() -> torch.nn.Module:
+            return _build_problem1a_mcd_predictor(
+                build_result=build_result,
+                hidden_dim=int(args.hidden_dim),
+                depth=int(args.depth),
+                dropout=float(args.dropout),
+                device=device,
+            )
+        return predictor_factory
+
+    if predictor_type == "dkl":
+        def predictor_factory() -> torch.nn.Module:
+            model = MultiHeadNodewiseDKL(
+                external_input_dim=int(build_result.config.input_dim),
+                node_input_dims=[
+                    int(build_result.config.input_dim),   # node 0: x -> z
+                    int(build_result.config.latent_dim),  # node 1 input: z
+                ],
+                parent_nodes=None,
+                active_input_indices=None,
+                hidden=int(args.dkl_hidden),
+                depth=2,
+                feature_dim=int(args.dkl_feature_dim),
+                kernel_type=str(args.dkl_kernel),
+                sink_idx=1,
+            )
+            return model.to(device=device)
+
+        return predictor_factory
+
+    raise ValueError(f"Unsupported predictor_type: {predictor_type}")
 
 def _outer_train_config(args: argparse.Namespace) -> ProtocolTrainingConfig:
     return ProtocolTrainingConfig(
@@ -221,8 +300,18 @@ def main() -> None:
     options = get_fantasy_protocol1a_options(
         overrides={
             "target_protocol_id": benchmark.target_protocol_id,
-            "fantasy_train_steps": int(args.fantasy_train_steps),
+            "predictor_type": str(args.predictor_type).lower(),
+            "hidden": int(args.hidden_dim),
+            "p_drop": float(args.dropout),
             "mc_samples": int(args.fantasy_mc_samples),
+            "fantasy_train_steps": int(args.fantasy_train_steps),
+            "dkl_hidden": int(args.dkl_hidden),
+            "dkl_feature_dim": int(args.dkl_feature_dim),
+            "dkl_kernel": str(args.dkl_kernel),
+            "dkl_inference": str(args.dkl_inference),
+            "dkl_noise": float(args.dkl_noise),
+            "feature_dim": int(args.dkl_feature_dim),
+            "kernel_type": str(args.dkl_kernel),
         }
     )
 
@@ -263,14 +352,11 @@ def main() -> None:
         device=str(args.device),
     )
 
-    def predictor_factory() -> torch.nn.Module:
-        return _build_predictor_for_problem1a(
-            build_result=build_result,
-            hidden_dim=int(args.hidden_dim),
-            depth=int(args.depth),
-            dropout=float(args.dropout),
-            device=device,
-        )
+    predictor_factory = _build_predictor_factory(
+        build_result=build_result,
+        args=args,
+        device=device,
+    )
 
     run_result = run_protocol_active_learning(
         predictor_factory=predictor_factory,
@@ -316,6 +402,7 @@ def main() -> None:
 
         stem = (
             f"protocol1a_fantasy"
+            f"_pred{str(args.predictor_type).lower()}"
             f"_trial{int(args.trial)}"
             f"_budget{int(args.budget)}"
             f"_seed{int(args.seed)}"

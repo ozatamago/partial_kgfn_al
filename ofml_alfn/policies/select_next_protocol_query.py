@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence
+from dataclasses import dataclass, replace
+import random
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import torch
 
-from ofml_alfn.metrics.protocol_evaluation import compute_target_validation_loss
+from ofml_alfn.metrics.protocol_evaluation import (
+    compute_cost_normalized_target_validation_improvement,
+    compute_target_validation_loss,
+)
 from ofml_alfn.policies.protocol_candidates import (
     ProtocolQueryCandidate,
     filter_affordable_protocol_candidates,
@@ -51,6 +55,10 @@ def _normalize_protocol_map(
     return protocol_map
 
 
+def _predictor_type(predictor: torch.nn.Module) -> str:
+    return str(getattr(predictor, "predictor_type", "generic")).lower()
+
+
 def _condition_tensor_from_sample(
     sample: BenchmarkSample,
     protocol: ProtocolSpec,
@@ -61,18 +69,108 @@ def _condition_tensor_from_sample(
     return torch.tensor(row, dtype=torch.float32, device=device).unsqueeze(0)
 
 
-def _make_fantasy_sample(
-    sample: BenchmarkSample,
+def _extract_prediction_tensor(
+    pred_obj: Any,
     *,
-    fantasy_target: torch.Tensor,
-    fantasy_index: int,
-) -> BenchmarkSample:
-    from dataclasses import replace
+    device: torch.device,
+    protocol_id: str,
+) -> torch.Tensor:
+    candidate = pred_obj
 
-    return replace(
-        sample,
-        sample_id=f"{sample.sample_id}__fantasy_{fantasy_index:03d}",
-        target_value=fantasy_target.detach().cpu().clone(),
+    if isinstance(candidate, Mapping):
+        for key in ("target", "target_pred", "prediction", "pred", "mean"):
+            if key in candidate:
+                candidate = candidate[key]
+                break
+    elif not torch.is_tensor(candidate):
+        for attr in ("target", "target_pred", "prediction", "pred", "target_value", "mean"):
+            if hasattr(candidate, attr):
+                candidate = getattr(candidate, attr)
+                break
+
+    if not torch.is_tensor(candidate):
+        raise TypeError(
+            f"Could not extract tensor prediction for protocol {protocol_id!r}. "
+            f"Got object of type {type(pred_obj)}"
+        )
+
+    candidate = candidate.detach().to(dtype=torch.float32, device=device)
+    if candidate.ndim == 0:
+        candidate = candidate.view(1, 1)
+    elif candidate.ndim == 1:
+        candidate = candidate.unsqueeze(-1)
+    return candidate
+
+
+def _predict_target_batch(
+    predictor: torch.nn.Module,
+    *,
+    protocol: ProtocolSpec,
+    condition_x: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    if hasattr(predictor, "forward_target"):
+        pred_obj = predictor.forward_target(protocol=protocol, condition_x=condition_x)
+        return _extract_prediction_tensor(
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
+        )
+
+    if hasattr(predictor, "forward_protocol"):
+        pred_obj = predictor.forward_protocol(protocol=protocol, condition_x=condition_x)
+        return _extract_prediction_tensor(
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
+        )
+
+    try:
+        pred_obj = predictor(protocol=protocol, condition_x=condition_x)
+        return _extract_prediction_tensor(
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
+        )
+    except TypeError:
+        pass
+
+    pred_obj = predictor(protocol, condition_x)
+    return _extract_prediction_tensor(
+        pred_obj,
+        device=device,
+        protocol_id=protocol.protocol_id,
+    )
+
+
+def _coerce_fantasy_tensor_list(
+    fantasy_out: Any,
+    *,
+    device: torch.device,
+) -> List[torch.Tensor]:
+    if torch.is_tensor(fantasy_out):
+        fantasy_out = fantasy_out.detach().to(dtype=torch.float32, device=device)
+        if fantasy_out.ndim == 0:
+            fantasy_out = fantasy_out.view(1, 1)
+        elif fantasy_out.ndim == 1:
+            fantasy_out = fantasy_out.unsqueeze(-1)
+        return [fantasy_out[i].detach().cpu().reshape(-1) for i in range(fantasy_out.shape[0])]
+
+    if isinstance(fantasy_out, Sequence):
+        out: List[torch.Tensor] = []
+        for item in fantasy_out:
+            if not torch.is_tensor(item):
+                item = torch.as_tensor(item, dtype=torch.float32)
+            item = item.detach().to(dtype=torch.float32, device=device)
+            if item.ndim == 0:
+                item = item.unsqueeze(0)
+            elif item.ndim > 1:
+                item = item.reshape(-1)
+            out.append(item.detach().cpu().clone())
+        return out
+
+    raise TypeError(
+        f"Unsupported fantasy sampler output type: {type(fantasy_out)}"
     )
 
 
@@ -82,16 +180,51 @@ def _sample_fantasy_targets(
     protocol: ProtocolSpec,
     condition_x: torch.Tensor,
     n_fantasies: int,
+    device: torch.device,
 ) -> List[torch.Tensor]:
+    """
+    Fantasy target sampling strategy.
+
+    Priority:
+    1. predictor-specific fantasy sampler hook
+    2. MCD-style repeated stochastic forward passes
+    """
+    for method_name in (
+        "sample_protocol_fantasy_targets",
+        "sample_fantasy_targets",
+        "sample_predictive_targets",
+    ):
+        method = getattr(predictor, method_name, None)
+        if callable(method):
+            fantasy_out = method(
+                protocol=protocol,
+                condition_x=condition_x,
+                n_fantasies=int(n_fantasies),
+            )
+            return _coerce_fantasy_tensor_list(
+                fantasy_out,
+                device=device,
+            )
+
+    predictor_kind = _predictor_type(predictor)
+    if predictor_kind == "dkl":
+        raise NotImplementedError(
+            "predictor_type='dkl' requires a predictor-specific fantasy sampler hook "
+            "(sample_protocol_fantasy_targets, sample_fantasy_targets, or "
+            "sample_predictive_targets)."
+        )
+
     was_training = predictor.training
     predictor.train()
 
     out: List[torch.Tensor] = []
     with torch.no_grad():
         for _ in range(int(n_fantasies)):
-            pred = predictor.forward_target(
+            pred = _predict_target_batch(
+                predictor,
                 protocol=protocol,
                 condition_x=condition_x,
+                device=device,
             )
             out.append(pred.detach().cpu().reshape(-1))
 
@@ -101,10 +234,64 @@ def _sample_fantasy_targets(
     return out
 
 
+def _make_fantasy_sample(
+    sample: BenchmarkSample,
+    *,
+    fantasy_target: torch.Tensor,
+    fantasy_index: int,
+) -> BenchmarkSample:
+    return replace(
+        sample,
+        sample_id=f"{sample.sample_id}__fantasy_{fantasy_index:03d}",
+        target_value=fantasy_target.detach().cpu().clone(),
+    )
+
+
 def _mean(xs: Sequence[float]) -> float:
     if len(xs) == 0:
         return float("nan")
     return float(sum(xs) / len(xs))
+
+
+def _group_candidates_by_protocol(
+    candidates: Sequence[ProtocolQueryCandidate],
+) -> Dict[str, List[ProtocolQueryCandidate]]:
+    grouped: Dict[str, List[ProtocolQueryCandidate]] = {}
+    for cand in candidates:
+        grouped.setdefault(cand.protocol_id, []).append(cand)
+    return grouped
+
+
+def _subsample_candidates_per_protocol(
+    candidates: Sequence[ProtocolQueryCandidate],
+    *,
+    max_per_protocol: int = 20,
+    seed: Optional[int] = None,
+) -> List[ProtocolQueryCandidate]:
+    """
+    Randomly subsample candidates within each protocol.
+
+    This is a simple compute-saving shortcut:
+    after budget filtering, keep at most `max_per_protocol`
+    candidates for each protocol.
+    """
+    if max_per_protocol <= 0:
+        raise ValueError(f"max_per_protocol must be positive, got {max_per_protocol}")
+
+    grouped = _group_candidates_by_protocol(candidates)
+    rng = random.Random(seed)
+
+    selected: List[ProtocolQueryCandidate] = []
+    for protocol_id in sorted(grouped.keys()):
+        group = list(grouped[protocol_id])
+        if len(group) <= max_per_protocol:
+            selected.extend(group)
+            continue
+
+        rng.shuffle(group)
+        selected.extend(group[:max_per_protocol])
+
+    return selected
 
 
 def score_protocol_query_candidate(
@@ -141,6 +328,7 @@ def score_protocol_query_candidate(
         protocol=protocol,
         condition_x=condition_x,
         n_fantasies=n_fantasies,
+        device=device,
     )
 
     fantasy_val_losses: List[float] = []
@@ -176,7 +364,11 @@ def score_protocol_query_candidate(
         fantasy_improvements.append(float(current_target_val_loss - fantasy_val_loss))
 
     mean_improvement = _mean(fantasy_improvements)
-    score = mean_improvement / max(float(candidate.acquisition_cost), 1e-12)
+    score = compute_cost_normalized_target_validation_improvement(
+        current_loss=float(current_target_val_loss),
+        updated_loss=float(current_target_val_loss - mean_improvement),
+        acquisition_cost=float(candidate.acquisition_cost),
+    )
 
     return FantasyCandidateScore(
         candidate_id=candidate.candidate_id,
@@ -209,12 +401,21 @@ def select_next_protocol_query(
         remaining_budget=remaining_budget,
     )
 
+    # --------------------------------------------------------------
+    # Compute-saving candidate subsampling:
+    # keep at most 20 random candidates per protocol
+    # --------------------------------------------------------------
+    candidate_subset = _subsample_candidates_per_protocol(
+        affordable_candidates,
+        max_per_protocol=20,
+    )
+
     all_scores: List[FantasyCandidateScore] = []
     best_candidate: Optional[ProtocolQueryCandidate] = None
     best_score_obj: Optional[FantasyCandidateScore] = None
     best_score = float("-inf")
 
-    for candidate in affordable_candidates:
+    for candidate in candidate_subset:
         score_obj = score_protocol_query_candidate(
             predictor,
             protocols=protocol_map,

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 
 from typing import Any, Dict, Optional, Sequence
 
 import torch
 import torch.nn as nn
 
-from partial_alfn.models.multihead_mc_dropout_mlp import MultiHeadMCDropoutMLP
-from partial_alfn.models.nodewise_dkl import MultiHeadNodewiseDKL
+from ofml_alfn.models.multihead_mc_dropout_mlp import MultiHeadMCDropoutMLP
+from ofml_alfn.models.nodewise_dkl import MultiHeadNodewiseDKL
 
 
 def _to_options_dict(options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -29,7 +30,7 @@ def _infer_node_input_dims(
             f"got {len(parent_nodes)} and {len(active_input_indices)}"
         )
 
-    node_input_dims = []
+    node_input_dims: list[int] = []
     for j in range(len(parent_nodes)):
         d_j = len(parent_nodes[j]) + len(active_input_indices[j])
         if d_j <= 0:
@@ -38,8 +39,19 @@ def _infer_node_input_dims(
                 "Each node must depend on at least one parent output or one "
                 "active external input."
             )
-        node_input_dims.append(d_j)
+        node_input_dims.append(int(d_j))
     return node_input_dims
+
+
+def _get_first_present(
+    opts: Dict[str, Any],
+    keys: Sequence[str],
+    default: Any,
+) -> Any:
+    for k in keys:
+        if k in opts and opts[k] is not None:
+            return opts[k]
+    return default
 
 
 def build_predictor(
@@ -67,13 +79,17 @@ def build_predictor(
         predictor_type: str = "mcd"
         hidden: int = 256
         sink_idx: Optional[int] = None
+        dtype: torch.dtype = torch.get_default_dtype()
+        device: Optional[torch.device | str] = None
 
     MCD-specific:
         p_drop: float = 0.1
 
     DKL-specific:
-        feature_dim: int = 32
-        kernel_type: str = "rbf"
+        dkl_hidden or hidden: int = 256
+        dkl_feature_dim or feature_dim: int = 32
+        dkl_kernel or kernel_type: str = "rbf"
+        dkl_inference: str = "exact"
 
     Returns
     -------
@@ -82,7 +98,6 @@ def build_predictor(
     opts = _to_options_dict(options)
 
     predictor_type = str(opts.get("predictor_type", "mcd")).lower()
-    hidden = int(opts.get("hidden", 256))
 
     external_input_dim = int(_require_problem_attr(problem, "dim"))
     n_nodes = int(_require_problem_attr(problem, "n_nodes"))
@@ -114,7 +129,8 @@ def build_predictor(
     device = opts.get("device", None)
 
     if predictor_type == "mcd":
-        p_drop = float(opts.get("p_drop", 0.1))
+        hidden = int(_get_first_present(opts, ["hidden"], 256))
+        p_drop = float(_get_first_present(opts, ["p_drop", "dropout"], 0.1))
 
         predictor = MultiHeadMCDropoutMLP(
             external_input_dim=external_input_dim,
@@ -127,8 +143,23 @@ def build_predictor(
         )
 
     elif predictor_type == "dkl":
-        feature_dim = int(opts.get("feature_dim", 32))
-        kernel_type = str(opts.get("kernel_type", "rbf")).lower()
+        dkl_inference = str(
+            _get_first_present(opts, ["dkl_inference"], "exact")
+        ).lower()
+        if dkl_inference != "exact":
+            raise NotImplementedError(
+                f"dkl_inference={dkl_inference!r} is not supported by "
+                "MultiHeadNodewiseDKL in the current ofml_alfn implementation. "
+                "Use 'exact'."
+            )
+
+        hidden = int(_get_first_present(opts, ["dkl_hidden", "hidden"], 256))
+        feature_dim = int(
+            _get_first_present(opts, ["dkl_feature_dim", "feature_dim"], 32)
+        )
+        kernel_type = str(
+            _get_first_present(opts, ["dkl_kernel", "kernel_type"], "rbf")
+        ).lower()
 
         predictor = MultiHeadNodewiseDKL(
             external_input_dim=external_input_dim,
@@ -152,3 +183,6 @@ def build_predictor(
         predictor = predictor.to(device=device)
 
     return predictor
+
+
+__all__ = ["build_predictor"]

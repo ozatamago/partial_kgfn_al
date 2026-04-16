@@ -24,7 +24,12 @@ def _validate_positive_int(name: str, value: int) -> int:
     return value
 
 
-def _to_2d_tensor(x: Any, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+def _to_2d_tensor(
+    x: Any,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
     if not torch.is_tensor(x):
         x = torch.as_tensor(x, dtype=dtype, device=device)
     else:
@@ -36,7 +41,9 @@ def _to_2d_tensor(x: Any, *, dtype: torch.dtype, device: torch.device) -> torch.
         x = x.unsqueeze(0)
 
     if x.ndim != 2:
-        raise ValueError(f"Expected 2D tensor after normalization, got shape {tuple(x.shape)}")
+        raise ValueError(
+            f"Expected 2D tensor after normalization, got shape {tuple(x.shape)}"
+        )
     return x
 
 
@@ -52,6 +59,23 @@ def _activation_module(name: ActivationName) -> nn.Module:
     if name == "gelu":
         return nn.GELU()
     raise ValueError(f"Unknown activation name: {name!r}")
+
+
+def copy_module(module: nn.Module) -> nn.Module:
+    """
+    Lightweight copier for stateless activation modules.
+    """
+    if isinstance(module, nn.Identity):
+        return nn.Identity()
+    if isinstance(module, nn.ReLU):
+        return nn.ReLU()
+    if isinstance(module, nn.Tanh):
+        return nn.Tanh()
+    if isinstance(module, nn.Sigmoid):
+        return nn.Sigmoid()
+    if isinstance(module, nn.GELU):
+        return nn.GELU()
+    raise TypeError(f"Unsupported module type for copy_module: {type(module)}")
 
 
 class BaseProcessModule(nn.Module):
@@ -99,15 +123,27 @@ class BaseProcessModule(nn.Module):
             out_dims = {str(k): int(v) for k, v in output_key_dims.items()}
             if len(out_dims) == 0:
                 raise ValueError("output_key_dims must be non-empty if provided")
+
             for key, dim in out_dims.items():
                 _validate_nonempty_str("output_key_dims key", key)
                 _validate_positive_int(f"output_key_dims[{key}]", dim)
+
             if sum(out_dims.values()) != self.output_dim:
                 raise ValueError(
                     f"Sum of output_key_dims must equal output_dim={self.output_dim}, "
                     f"got sum={sum(out_dims.values())}"
                 )
+
             self.output_key_dims = out_dims
+
+    def _infer_device(self) -> torch.device:
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            try:
+                return next(self.buffers()).device
+            except StopIteration:
+                return torch.device("cpu")
 
     def _concat_inputs(
         self,
@@ -117,7 +153,6 @@ class BaseProcessModule(nn.Module):
     ) -> torch.Tensor:
         if not isinstance(inputs, Mapping):
             raise TypeError(f"inputs must be a mapping, got {type(inputs)}")
-
         if len(inputs) == 0:
             raise ValueError(f"Process {process.process_id!r} received empty inputs")
 
@@ -139,7 +174,9 @@ class BaseProcessModule(nn.Module):
                     f"Missing input key {key!r} for process {process.process_id!r}. "
                     f"Available keys: {sorted(inputs.keys())}"
                 )
+
             t = _to_2d_tensor(inputs[key], dtype=dtype, device=device)
+
             if batch_size is None:
                 batch_size = t.shape[0]
             elif t.shape[0] != batch_size:
@@ -147,14 +184,17 @@ class BaseProcessModule(nn.Module):
                     f"Inconsistent batch sizes for process {process.process_id!r}: "
                     f"expected {batch_size}, got {t.shape[0]} for key {key!r}"
                 )
+
             tensors.append(t)
 
         x = torch.cat(tensors, dim=1)
+
         if x.shape[1] != self.input_dim:
             raise ValueError(
                 f"Process module expected concatenated input_dim={self.input_dim}, "
                 f"got {x.shape[1]} for process {process.process_id!r}"
             )
+
         return x
 
     def _split_outputs(
@@ -163,7 +203,11 @@ class BaseProcessModule(nn.Module):
         process: ProcessSpec,
         y: torch.Tensor,
     ) -> torch.Tensor | Dict[str, torch.Tensor]:
-        y = _to_2d_tensor(y, dtype=self.default_dtype, device=y.device)
+        y = _to_2d_tensor(
+            y,
+            dtype=self.default_dtype,
+            device=y.device,
+        )
 
         if y.shape[1] != self.output_dim:
             raise ValueError(
@@ -193,23 +237,14 @@ class BaseProcessModule(nn.Module):
         if len(process.output_keys) != y.shape[1]:
             raise ValueError(
                 f"Process {process.process_id!r} has {len(process.output_keys)} output_keys "
-                f"but module returned shape {tuple(y.shape)}. Provide output_key_dims if "
-                f"one output key should consume multiple columns."
+                f"but module returned shape {tuple(y.shape)}. "
+                f"Provide output_key_dims if one output key should consume multiple columns."
             )
 
         return {
             key: y[:, i : i + 1]
             for i, key in enumerate(process.output_keys)
         }
-
-    def _infer_device(self) -> torch.device:
-        try:
-            return next(self.parameters()).device
-        except StopIteration:
-            try:
-                return next(self.buffers()).device
-            except StopIteration:
-                return torch.device("cpu")
 
     def forward_backbone(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -222,6 +257,7 @@ class BaseProcessModule(nn.Module):
         condition_x: Optional[torch.Tensor] = None,
         process_outputs: Optional[Mapping[str, Mapping[str, torch.Tensor]]] = None,
     ) -> torch.Tensor | Dict[str, torch.Tensor]:
+        del condition_x, process_outputs
         x = self._concat_inputs(process=process, inputs=inputs)
         y = self.forward_backbone(x)
         return self._split_outputs(process=process, y=y)
@@ -237,6 +273,7 @@ class BaseProcessModule(nn.Module):
 class LinearProcessModule(BaseProcessModule):
     """
     Single affine map for a process.
+
     Useful for very small experiments or ablations.
     """
 
@@ -256,6 +293,7 @@ class LinearProcessModule(BaseProcessModule):
             dtype=dtype,
         )
         self.linear = nn.Linear(input_dim, output_dim, bias=bias)
+        self.to(dtype=dtype)
 
     def forward_backbone(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
@@ -268,7 +306,6 @@ class MLPProcessModule(BaseProcessModule):
     This is the default learnable module for both:
     - shared_upstream
     - observer_i
-
     in the first OFML 1_A experiments.
     """
 
@@ -293,7 +330,10 @@ class MLPProcessModule(BaseProcessModule):
 
         if len(hidden_dims) == 0:
             raise ValueError("hidden_dims must be non-empty for MLPProcessModule")
-        hidden_dims = tuple(_validate_positive_int("hidden_dim", h) for h in hidden_dims)
+
+        hidden_dims = tuple(
+            _validate_positive_int("hidden_dim", h) for h in hidden_dims
+        )
 
         if dropout < 0.0 or dropout >= 1.0:
             raise ValueError(f"dropout must be in [0, 1), got {dropout}")
@@ -301,24 +341,26 @@ class MLPProcessModule(BaseProcessModule):
         layers = []
         prev_dim = input_dim
         hidden_act = _activation_module(activation)
-        out_act = _activation_module(output_activation)
 
         for h in hidden_dims:
             layers.append(nn.Linear(prev_dim, h))
             layers.append(copy_module(hidden_act))
             if dropout > 0.0:
-                layers.append(nn.Dropout(p=dropout))
+                layers.append(nn.Dropout(p=float(dropout)))
             prev_dim = h
 
         layers.append(nn.Linear(prev_dim, output_dim))
+
         if output_activation != "identity":
-            layers.append(out_act)
+            layers.append(_activation_module(output_activation))
 
         self.network = nn.Sequential(*layers)
         self.hidden_dims = hidden_dims
         self.activation_name = activation
         self.output_activation_name = output_activation
         self.dropout = float(dropout)
+
+        self.to(dtype=dtype)
 
     def forward_backbone(self, x: torch.Tensor) -> torch.Tensor:
         return self.network(x)
@@ -357,23 +399,6 @@ class IdentityProcessModule(BaseProcessModule):
 
     def forward_backbone(self, x: torch.Tensor) -> torch.Tensor:
         return x
-
-
-def copy_module(module: nn.Module) -> nn.Module:
-    """
-    Lightweight module copier for stateless activation modules.
-    """
-    if isinstance(module, nn.Identity):
-        return nn.Identity()
-    if isinstance(module, nn.ReLU):
-        return nn.ReLU()
-    if isinstance(module, nn.Tanh):
-        return nn.Tanh()
-    if isinstance(module, nn.Sigmoid):
-        return nn.Sigmoid()
-    if isinstance(module, nn.GELU):
-        return nn.GELU()
-    raise TypeError(f"Unsupported module type for copy_module: {type(module)}")
 
 
 def make_problem_1a_shared_upstream_module(
@@ -453,9 +478,11 @@ def make_problem_1a_module_registry(
     Each observer has its own learnable module.
     """
     observer_module_keys = tuple(observer_module_keys)
+
     if len(observer_module_keys) != 3:
         raise ValueError(
-            f"observer_module_keys must have length 3 for Problem 1_A, got {observer_module_keys}"
+            f"observer_module_keys must have length 3 for Problem 1_A, "
+            f"got {observer_module_keys}"
         )
     if len(set(observer_module_keys)) != 3:
         raise ValueError(

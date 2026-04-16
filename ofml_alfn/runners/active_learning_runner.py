@@ -105,6 +105,25 @@ def run_protocol_active_learning(
     target_test_samples: Sequence[BenchmarkSample],
     config: ActiveLearningRunnerConfig,
 ) -> ActiveLearningRunResult:
+    """
+    Run protocol-level active learning with fantasy selection.
+
+    Loop per round
+    --------------
+    1. Build a fresh predictor from predictor_factory().
+    2. Train it on current_train_samples.
+    3. Measure target validation and target test loss.
+    4. Build protocol query candidates from the remaining pool.
+    5. Use select_next_protocol_query(...) to choose the next acquisition.
+    6. Add the selected sample to the train set and update the budget.
+
+    Notes
+    -----
+    - DKL support is delegated to predictor-specific hooks inside
+      train_protocol_predictor(...) and evaluate_protocol_predictor(...).
+    - Fantasy sampling details are delegated to
+      select_next_protocol_query(...).
+    """
     protocol_map = _normalize_protocol_map(protocols)
     if config.target_protocol_id not in protocol_map:
         raise KeyError(
