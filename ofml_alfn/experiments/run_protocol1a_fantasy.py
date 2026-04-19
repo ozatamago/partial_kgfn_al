@@ -5,7 +5,7 @@ import argparse
 import json
 import logging
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -17,24 +17,51 @@ from ofml_alfn.benchmarks.dataset_builders.build_problem_1a import (
     build_problem_1a_dataset,
 )
 from ofml_alfn.configs.fantasy_protocol1a import get_fantasy_protocol1a_options
+from ofml_alfn.models.nodewise_dkl import MultiHeadNodewiseDKL
 from ofml_alfn.models.process_modules import make_problem_1a_module_registry
 from ofml_alfn.models.protocol_predictor import build_protocol_predictor
 from ofml_alfn.runners.active_learning_runner import (
     ActiveLearningRunnerConfig,
     run_protocol_active_learning,
 )
+from ofml_alfn.runners.sequential_target_adapt_runner import (
+    SequentialTargetAdaptRunnerConfig,
+    run_sequential_target_adapt,
+)
+from ofml_alfn.training.pretrain_then_adapt import (
+    PretrainThenAdaptConfig,
+    run_pretrain_then_adapt,
+)
 from ofml_alfn.training.train_protocol_predictor import ProtocolTrainingConfig
 from ofml_alfn.utils.protocol_types import BenchmarkSample
-from ofml_alfn.models.model_factory import build_predictor
-from ofml_alfn.models.nodewise_dkl import MultiHeadNodewiseDKL
 
 logger = logging.getLogger(__name__)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Problem 1A fantasy acquisition experiment."
+        description="Run Problem 1A experiments with mode switching."
     )
+
+    parser.add_argument(
+        "--experiment_mode",
+        type=str,
+        default="fantasy_al",
+        choices=[
+            "fantasy_al",
+            "pretrain_then_adapt",
+            "scratch_then_sequential_adapt",
+            "pretrain_then_sequential_adapt",
+        ],
+    )
+
+    parser.add_argument(
+        "--target_acquisition_policy",
+        type=str,
+        default="random",
+        choices=["random", "fantasy"],
+    )
+    parser.add_argument("--target_adapt_budget", type=int, default=30)
 
     parser.add_argument("--trial", type=int, default=0)
     parser.add_argument("--budget", type=float, default=40.0)
@@ -68,15 +95,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--latent_dim", type=int, default=4)
     parser.add_argument("--output_dim", type=int, default=1)
 
-    # Common model size
     parser.add_argument("--hidden_dim", type=int, default=64)
     parser.add_argument("--depth", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
 
-    # Backend selection
-    parser.add_argument("--predictor_type", type=str, default="mcd", choices=["mcd", "dkl"])
+    parser.add_argument(
+        "--predictor_type",
+        type=str,
+        default="mcd",
+        choices=["mcd", "dkl"],
+    )
 
-    # DKL-specific
     parser.add_argument("--dkl_hidden", type=int, default=256)
     parser.add_argument("--dkl_feature_dim", type=int, default=32)
     parser.add_argument("--dkl_kernel", type=str, default="rbf", choices=["rbf", "matern"])
@@ -98,7 +127,7 @@ def _parse_args() -> argparse.Namespace:
 
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--output_dir", type=str, default="outputs/protocol1a_fantasy")
+    parser.add_argument("--output_dir", type=str, default="outputs/protocol1a")
     parser.add_argument("--save_json", action="store_true")
     parser.add_argument("--verbose", action="store_true")
 
@@ -156,31 +185,6 @@ def _build_problem1a_mcd_predictor(
     )
     return predictor
 
-@dataclass(frozen=True)
-class _Problem1AGraphAdapter:
-    dim: int
-    n_nodes: int
-    parent_nodes: List[List[int]]
-    active_input_indices: List[List[int]]
-
-
-def _make_problem1a_graph_adapter(
-    build_result: Problem1ADatasetBuildResult,
-) -> _Problem1AGraphAdapter:
-    benchmark = build_result.benchmark
-    target_protocol = benchmark.target_protocol
-
-    # Problem 1A is always a 2-process graph:
-    # S1: shared upstream, takes all external inputs
-    # S2: observer, takes only the upstream output z
-    n_cond = len(target_protocol.condition_keys)
-
-    return _Problem1AGraphAdapter(
-        dim=n_cond,
-        n_nodes=2,
-        parent_nodes=[[], [0]],
-        active_input_indices=[list(range(n_cond)), []],
-    )
 
 def _build_predictor_factory(
     *,
@@ -206,13 +210,13 @@ def _build_predictor_factory(
             model = MultiHeadNodewiseDKL(
                 external_input_dim=int(build_result.config.input_dim),
                 node_input_dims=[
-                    int(build_result.config.input_dim),   # node 0: x -> z
-                    int(build_result.config.latent_dim),  # node 1 input: z
+                    int(build_result.config.input_dim),
+                    int(build_result.config.latent_dim),
                 ],
                 parent_nodes=None,
                 active_input_indices=None,
                 hidden=int(args.dkl_hidden),
-                depth=2,
+                depth=int(args.depth),
                 feature_dim=int(args.dkl_feature_dim),
                 kernel_type=str(args.dkl_kernel),
                 sink_idx=1,
@@ -222,6 +226,7 @@ def _build_predictor_factory(
         return predictor_factory
 
     raise ValueError(f"Unsupported predictor_type: {predictor_type}")
+
 
 def _outer_train_config(args: argparse.Namespace) -> ProtocolTrainingConfig:
     return ProtocolTrainingConfig(
@@ -278,8 +283,15 @@ def _build_problem1a_dataset_from_args(
     return build_problem_1a_dataset(cfg)
 
 
-def _history_to_dicts(history) -> List[Dict[str, Any]]:
-    return [asdict(row) for row in history]
+def _records_to_dicts(records) -> List[Dict[str, Any]]:
+    return [asdict(row) for row in records]
+
+
+def _final_losses_from_history(history_dicts: List[Dict[str, Any]]) -> Tuple[Any, Any]:
+    if len(history_dicts) == 0:
+        return None, None
+    last = history_dicts[-1]
+    return last.get("target_val_loss", None), last.get("target_test_loss", None)
 
 
 def main() -> None:
@@ -296,12 +308,17 @@ def main() -> None:
     build_result = _build_problem1a_dataset_from_args(args)
     benchmark = build_result.benchmark
     protocol_map = benchmark.protocol_map
+    target_protocol_id = benchmark.target_protocol_id
 
     options = get_fantasy_protocol1a_options(
         overrides={
-            "target_protocol_id": benchmark.target_protocol_id,
+            "experiment_mode": str(args.experiment_mode),
+            "target_protocol_id": target_protocol_id,
+            "target_acquisition_policy": str(args.target_acquisition_policy),
+            "target_adapt_budget": int(args.target_adapt_budget),
             "predictor_type": str(args.predictor_type).lower(),
             "hidden": int(args.hidden_dim),
+            "depth": int(args.depth),
             "p_drop": float(args.dropout),
             "mc_samples": int(args.fantasy_mc_samples),
             "fantasy_train_steps": int(args.fantasy_train_steps),
@@ -337,20 +354,8 @@ def main() -> None:
         seed=int(args.seed + args.trial + 33),
     )
 
-    initial_train_samples: List[BenchmarkSample] = init_p1 + init_p2 + init_p3
-    candidate_pool: List[BenchmarkSample] = pool_p1 + pool_p2 + pool_p3
-
     outer_cfg = _outer_train_config(args)
     fantasy_cfg = _fantasy_train_config(args)
-
-    runner_cfg = ActiveLearningRunnerConfig(
-        budget=float(args.budget),
-        target_protocol_id=benchmark.target_protocol_id,
-        n_fantasies=int(args.fantasy_mc_samples),
-        outer_train_config=outer_cfg,
-        fantasy_train_config=fantasy_cfg,
-        device=str(args.device),
-    )
 
     predictor_factory = _build_predictor_factory(
         build_result=build_result,
@@ -358,41 +363,202 @@ def main() -> None:
         device=device,
     )
 
-    run_result = run_protocol_active_learning(
-        predictor_factory=predictor_factory,
-        protocols=protocol_map,
-        initial_train_samples=initial_train_samples,
-        candidate_pool=candidate_pool,
-        target_val_samples=val_p3,
-        target_test_samples=test_p3,
-        config=runner_cfg,
-    )
+    selection_history: List[Dict[str, Any]] = []
 
-    history_dicts = _history_to_dicts(run_result.history)
-    n_acquisitions = max(
-        0,
-        len(run_result.final_train_samples) - len(initial_train_samples),
-    )
+    if args.experiment_mode == "fantasy_al":
+        initial_train_samples: List[BenchmarkSample] = init_p1 + init_p2 + init_p3
+        candidate_pool: List[BenchmarkSample] = pool_p1 + pool_p2 + pool_p3
 
-    summary = {
-        "experiment_name": "protocol1a_fantasy",
-        "trial": int(args.trial),
-        "seed": int(args.seed),
-        "budget": float(args.budget),
-        "spent_budget": float(run_result.spent_budget),
-        "n_rounds_completed": int(n_acquisitions),
-        "n_train_initial": int(len(initial_train_samples)),
-        "n_train_final": int(len(run_result.final_train_samples)),
-        "n_pool_initial": int(len(candidate_pool)),
-        "n_pool_final": int(len(run_result.final_candidate_pool)),
-        "target_protocol_id": benchmark.target_protocol_id,
-        "protocol_ids": list(benchmark.all_protocol_ids),
-        "protocol_costs": [float(x) for x in args.protocol_costs],
-        "similarities_to_target": [float(x) for x in args.similarities_to_target],
-        "options": options,
-        "dataset_summary": build_result.summary(),
-        "history": history_dicts,
-    }
+        runner_cfg = ActiveLearningRunnerConfig(
+            budget=float(args.budget),
+            target_protocol_id=target_protocol_id,
+            n_fantasies=int(args.fantasy_mc_samples),
+            outer_train_config=outer_cfg,
+            fantasy_train_config=fantasy_cfg,
+            device=str(args.device),
+        )
+
+        run_result = run_protocol_active_learning(
+            predictor_factory=predictor_factory,
+            protocols=protocol_map,
+            initial_train_samples=initial_train_samples,
+            candidate_pool=candidate_pool,
+            target_val_samples=val_p3,
+            target_test_samples=test_p3,
+            config=runner_cfg,
+        )
+
+        history_dicts = _records_to_dicts(run_result.history)
+        n_acquisitions = max(
+            0,
+            len(run_result.final_train_samples) - len(initial_train_samples),
+        )
+
+        summary = {
+            "experiment_name": "protocol1a",
+            "experiment_mode": "fantasy_al",
+            "trial": int(args.trial),
+            "seed": int(args.seed),
+            "budget": float(args.budget),
+            "spent_budget": float(run_result.spent_budget),
+            "n_rounds_completed": int(n_acquisitions),
+            "n_train_initial": int(len(initial_train_samples)),
+            "n_train_final": int(len(run_result.final_train_samples)),
+            "n_pool_initial": int(len(candidate_pool)),
+            "n_pool_final": int(len(run_result.final_candidate_pool)),
+            "target_protocol_id": target_protocol_id,
+            "protocol_ids": list(benchmark.all_protocol_ids),
+            "protocol_costs": [float(x) for x in args.protocol_costs],
+            "similarities_to_target": [float(x) for x in args.similarities_to_target],
+            "options": options,
+            "dataset_summary": build_result.summary(),
+            "history": history_dicts,
+        }
+
+        selection_history = run_result.selection_history
+
+    elif args.experiment_mode == "pretrain_then_adapt":
+        pretrain_result = run_pretrain_then_adapt(
+            predictor_factory=predictor_factory,
+            protocols=protocol_map,
+            source_pretrain_samples=pretrain_p1 + pretrain_p2,
+            target_adapt_samples=adapt_p3,
+            target_val_samples=val_p3,
+            target_test_samples=test_p3,
+            config=PretrainThenAdaptConfig(
+                target_protocol_id=target_protocol_id,
+                train_config=outer_cfg,
+            ),
+        )
+
+        summary = {
+            "experiment_name": "protocol1a",
+            "experiment_mode": "pretrain_then_adapt",
+            "trial": int(args.trial),
+            "seed": int(args.seed),
+            "budget": None,
+            "spent_budget": None,
+            "target_protocol_id": target_protocol_id,
+            "protocol_ids": list(benchmark.all_protocol_ids),
+            "protocol_costs": [float(x) for x in args.protocol_costs],
+            "similarities_to_target": [float(x) for x in args.similarities_to_target],
+            "options": options,
+            "dataset_summary": build_result.summary(),
+            "history": _records_to_dicts(pretrain_result.history),
+            "n_source_pretrain_samples": pretrain_result.n_source_pretrain_samples,
+            "n_target_adapt_samples": pretrain_result.n_target_adapt_samples,
+            "final_target_val_loss": pretrain_result.final_target_val_loss,
+            "final_target_test_loss": pretrain_result.final_target_test_loss,
+        }
+
+    elif args.experiment_mode == "scratch_then_sequential_adapt":
+        seq_cfg = SequentialTargetAdaptRunnerConfig(
+            target_protocol_id=target_protocol_id,
+            acquisition_policy=str(args.target_acquisition_policy),
+            adapt_budget_points=int(args.target_adapt_budget),
+            outer_train_config=outer_cfg,
+            fantasy_train_config=(
+                fantasy_cfg if str(args.target_acquisition_policy).lower() == "fantasy" else None
+            ),
+            n_fantasies=int(args.fantasy_mc_samples),
+            device=str(args.device),
+            random_seed=int(args.seed + args.trial),
+        )
+
+        seq_result = run_sequential_target_adapt(
+            predictor_factory=predictor_factory,
+            protocols=protocol_map,
+            initial_train_samples=list(init_p3),
+            target_candidate_pool=list(pool_p3),
+            target_val_samples=val_p3,
+            target_test_samples=test_p3,
+            config=seq_cfg,
+        )
+
+        history_dicts = _records_to_dicts(seq_result.history)
+        final_val_loss, final_test_loss = _final_losses_from_history(history_dicts)
+
+        summary = {
+            "experiment_name": "protocol1a",
+            "experiment_mode": "scratch_then_sequential_adapt",
+            "trial": int(args.trial),
+            "seed": int(args.seed),
+            "budget": int(args.target_adapt_budget),
+            "spent_budget": int(seq_result.n_target_points_used),
+            "target_protocol_id": target_protocol_id,
+            "protocol_ids": list(benchmark.all_protocol_ids),
+            "protocol_costs": [float(x) for x in args.protocol_costs],
+            "similarities_to_target": [float(x) for x in args.similarities_to_target],
+            "options": options,
+            "dataset_summary": build_result.summary(),
+            "history": history_dicts,
+            "n_source_pretrain_samples": 0,
+            "n_target_initial_samples": int(len(init_p3)),
+            "n_target_pool_initial": int(len(pool_p3)),
+            "n_target_points_used": int(seq_result.n_target_points_used),
+            "target_cost_used": float(seq_result.target_cost_used),
+            "final_target_val_loss": final_val_loss,
+            "final_target_test_loss": final_test_loss,
+        }
+
+        selection_history = seq_result.selection_history
+
+    elif args.experiment_mode == "pretrain_then_sequential_adapt":
+        seq_cfg = SequentialTargetAdaptRunnerConfig(
+            target_protocol_id=target_protocol_id,
+            acquisition_policy=str(args.target_acquisition_policy),
+            adapt_budget_points=int(args.target_adapt_budget),
+            outer_train_config=outer_cfg,
+            fantasy_train_config=(
+                fantasy_cfg if str(args.target_acquisition_policy).lower() == "fantasy" else None
+            ),
+            n_fantasies=int(args.fantasy_mc_samples),
+            device=str(args.device),
+            random_seed=int(args.seed + args.trial),
+        )
+
+        initial_train_samples = list(pretrain_p1) + list(pretrain_p2) + list(init_p3)
+
+        seq_result = run_sequential_target_adapt(
+            predictor_factory=predictor_factory,
+            protocols=protocol_map,
+            initial_train_samples=initial_train_samples,
+            target_candidate_pool=list(pool_p3),
+            target_val_samples=val_p3,
+            target_test_samples=test_p3,
+            config=seq_cfg,
+        )
+
+        history_dicts = _records_to_dicts(seq_result.history)
+        final_val_loss, final_test_loss = _final_losses_from_history(history_dicts)
+
+        summary = {
+            "experiment_name": "protocol1a",
+            "experiment_mode": "pretrain_then_sequential_adapt",
+            "trial": int(args.trial),
+            "seed": int(args.seed),
+            "budget": int(args.target_adapt_budget),
+            "spent_budget": int(seq_result.n_target_points_used),
+            "target_protocol_id": target_protocol_id,
+            "protocol_ids": list(benchmark.all_protocol_ids),
+            "protocol_costs": [float(x) for x in args.protocol_costs],
+            "similarities_to_target": [float(x) for x in args.similarities_to_target],
+            "options": options,
+            "dataset_summary": build_result.summary(),
+            "history": history_dicts,
+            "n_source_pretrain_samples": int(len(pretrain_p1) + len(pretrain_p2)),
+            "n_target_initial_samples": int(len(init_p3)),
+            "n_target_pool_initial": int(len(pool_p3)),
+            "n_target_points_used": int(seq_result.n_target_points_used),
+            "target_cost_used": float(seq_result.target_cost_used),
+            "final_target_val_loss": final_val_loss,
+            "final_target_test_loss": final_test_loss,
+        }
+
+        selection_history = seq_result.selection_history
+
+    else:
+        raise ValueError(f"Unsupported experiment_mode: {args.experiment_mode}")
 
     print(json.dumps(summary, indent=2))
 
@@ -401,18 +567,20 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         stem = (
-            f"protocol1a_fantasy"
+            f"protocol1a"
+            f"_mode{str(args.experiment_mode)}"
+            f"_policy{str(args.target_acquisition_policy)}"
             f"_pred{str(args.predictor_type).lower()}"
             f"_trial{int(args.trial)}"
-            f"_budget{int(args.budget)}"
             f"_seed{int(args.seed)}"
         )
 
         with open(out_dir / f"{stem}.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
 
-        with open(out_dir / f"{stem}_selections.json", "w", encoding="utf-8") as f:
-            json.dump(run_result.selection_history, f, indent=2)
+        if len(selection_history) > 0:
+            with open(out_dir / f"{stem}_selections.json", "w", encoding="utf-8") as f:
+                json.dump(selection_history, f, indent=2)
 
         logger.warning("Saved outputs to %s", out_dir)
 

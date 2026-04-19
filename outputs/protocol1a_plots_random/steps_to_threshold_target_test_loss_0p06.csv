@@ -1,0 +1,3 @@
+method_label,threshold,mean_steps,std_steps,n_reached
+pretrain,0.06,7.0,0.0,1
+scratch,0.06,10.0,0.0,1

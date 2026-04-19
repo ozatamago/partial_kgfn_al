@@ -11,17 +11,23 @@ def get_fantasy_protocol1a_options(
     overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Options for Problem 1A fantasy acquisition.
+    Unified options for Problem 1A experiments.
 
-    Design intent
-    -------------
-    - Use protocol-level fantasy acquisition.
-    - Score each candidate by:
-          expected target validation loss reduction / acquisition cost
-    - Keep the existing default AL backbone and only override the knobs
-      that are specific to Problem 1A fantasy selection.
-    - Expose both MCD and DKL-related knobs so the experiment script can
-      switch predictor backends without changing this file again.
+    Supported experiment modes
+    --------------------------
+    1. fantasy_al
+       Cost-normalized fantasy acquisition over protocol_1, protocol_2, protocol_3.
+
+    2. pretrain_then_adapt
+       Two-stage experiment:
+         - pretrain on similar source observers
+         - adapt on target observer
+         - evaluate on target validation / test
+
+    Notes
+    -----
+    The function name is kept for backward compatibility even though this config
+    now supports more than fantasy acquisition alone.
     """
     options = get_default_al_options(problem)
 
@@ -30,48 +36,61 @@ def get_fantasy_protocol1a_options(
             # --------------------------------------------------------------
             # Experiment identity
             # --------------------------------------------------------------
-            "experiment_name": "protocol1a_fantasy",
+            "experiment_name": "protocol1a",
             "problem_family": "protocol1a",
 
             # --------------------------------------------------------------
-            # Selector behavior
+            # Mode switching
+            # --------------------------------------------------------------
+            # Available values:
+            #   - "fantasy_al"
+            #   - "pretrain_then_adapt"
+            "experiment_mode": "fantasy_al",
+
+            # --------------------------------------------------------------
+            # Protocol-level bookkeeping
+            # --------------------------------------------------------------
+            # This should be overwritten by the experiment script after the
+            # concrete benchmark is built.
+            "target_protocol_id": None,
+
+            # Default source protocols used in pretrain_then_adapt mode.
+            "source_protocol_ids": ["protocol_1", "protocol_2"],
+
+            # Optional split-name hints for scripts that want to refer to the
+            # dataset builder outputs symbolically.
+            "source_pretrain_split_names": [
+                "pretrain_protocol_1",
+                "pretrain_protocol_2",
+            ],
+            "target_adapt_split_name": "adapt_protocol_3",
+            "target_val_split_name": "val_protocol_3",
+            "target_test_split_name": "test_protocol_3",
+
+            # --------------------------------------------------------------
+            # Fantasy acquisition behavior
             # --------------------------------------------------------------
             "selector_objective": "fantasy_gain",
             "selector_metric": "target_validation_loss",
             "selector_holdout_name": "target_validation",
             "cost_normalize_selector_score": True,
-
-            # Optional hook for generic selector paths.
-            # If set to a callable, selector code may use it instead of a
-            # generic tensor-based validation loss function.
             "target_validation_loss_fn": None,
 
-            # --------------------------------------------------------------
             # Candidate / query behavior
-            # --------------------------------------------------------------
-            # Do not restrict acquisition to target-only or sink-only queries.
             "sink_only": False,
             "enable_partial_queries": True,
-
-            # Relevant only if a lower-level uncertainty shortlist is used
-            # before fantasy scoring.
             "group_var_reduction": "sum",
-
-            # Keep all affordable groups eligible by default.
             "use_upstream_first": False,
             "uncertainty_threshold_tau": 0.5,
 
-            # --------------------------------------------------------------
-            # Fantasy lookahead
-            # --------------------------------------------------------------
-            # Number of update steps after appending one fantasy observation.
-            "fantasy_train_steps": 20,
+            # Candidate subsampling for compute reduction
+            # e.g. evaluate at most 20 candidates per protocol each round
+            "max_candidates_per_protocol": 20,
 
-            # Shortlist width before fantasy scoring, if such a shortlist is used.
+            # Fantasy lookahead
+            "fantasy_train_steps": 20,
             "fantasy_topk_candidates": 8,
             "fantasy_topk_groups": 2,
-
-            # Number of stochastic forward samples used by the fantasy routine.
             "mc_samples": 8,
             "n_posterior_samples": 64,
 
@@ -100,18 +119,21 @@ def get_fantasy_protocol1a_options(
             "kernel_type": "rbf",
 
             # --------------------------------------------------------------
-            # Problem-1A-specific bookkeeping
+            # Two-stage pretrain/adapt bookkeeping
             # --------------------------------------------------------------
-            # This should be overwritten by the experiment script after the
-            # concrete benchmark is built.
-            "target_protocol_id": None,
+            # These are mainly informational in the current implementation,
+            # but keeping them here makes the mode explicit and extensible.
+            "run_source_pretrain": True,
+            "run_target_adapt": True,
 
-            # Useful for logging / downstream analysis.
+            # If needed later, scripts can choose to override these independently.
+            "pretrain_train_steps": None,
+            "adapt_train_steps": None,
+
+            # --------------------------------------------------------------
+            # Logging / analysis
+            # --------------------------------------------------------------
             "acquisition_rule": "expected_target_val_loss_reduction_per_cost",
-
-            # --------------------------------------------------------------
-            # Logging / debugging
-            # --------------------------------------------------------------
             "debug_selector": True,
         }
     )

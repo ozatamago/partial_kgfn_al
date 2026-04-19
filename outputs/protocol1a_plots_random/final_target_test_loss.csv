@@ -1,0 +1,3 @@
+method_label,target_test_loss_mean,target_test_loss_std,n
+pretrain,0.008458527736365795,0.0,1
+scratch,0.014700080268085003,0.0,1

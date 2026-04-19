@@ -1,0 +1,18 @@
+{
+  "input_dir": "/Users/yusuke/Desktop/Program/icsi436/partial_kgfn_al/outputs/protocol1a",
+  "output_dir": "/Users/yusuke/Desktop/Program/icsi436/partial_kgfn_al/outputs/protocol1a_plots_random",
+  "n_runs_loaded": 2,
+  "included_modes": [
+    "scratch_then_sequential_adapt",
+    "pretrain_then_sequential_adapt"
+  ],
+  "metric": "target_test_loss",
+  "thresholds": [
+    0.1,
+    0.06
+  ],
+  "method_labels": [
+    "pretrain",
+    "scratch"
+  ]
+}
