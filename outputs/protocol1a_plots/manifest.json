@@ -1,0 +1,16 @@
+{
+  "input_dir": "/Users/yusuke/Desktop/Program/icsi436/partial_kgfn_al/outputs/protocol1a",
+  "output_dir": "/Users/yusuke/Desktop/Program/icsi436/partial_kgfn_al/outputs/protocol1a_plots",
+  "n_runs_loaded": 12,
+  "family1_sequential_policies": [
+    "fantasy",
+    "local_uncertainty",
+    "random"
+  ],
+  "family2_policies": [
+    "fantasy",
+    "local_uncertainty",
+    "random"
+  ],
+  "metric": "target_test_loss"
+}

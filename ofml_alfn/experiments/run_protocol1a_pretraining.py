@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
@@ -14,6 +15,9 @@ from ofml_alfn.runners.pretraining_runner import (
     run_problem_1a_pretraining_comparison,
 )
 from ofml_alfn.training.train_protocol_predictor import ProtocolTrainingConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 def _as_tuple_int(xs: Sequence[int]) -> Tuple[int, ...]:
@@ -32,7 +36,12 @@ def _ensure_dir(path: str | None) -> Path | None:
     return p
 
 
-def _bool_flag(parser: argparse.ArgumentParser, name: str, default: bool, help_text: str) -> None:
+def _bool_flag(
+    parser: argparse.ArgumentParser,
+    name: str,
+    default: bool,
+    help_text: str,
+) -> None:
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument(
         f"--{name}",
@@ -51,11 +60,13 @@ def _bool_flag(parser: argparse.ArgumentParser, name: str, default: bool, help_t
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run Problem 1_A scratch vs pretrain-then-adapt comparison."
+        description="Run Problem 1_A Family 1 scratch vs pretrain_then_adapt comparison."
     )
 
-    parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--save_json_name", type=str, default="problem1a_pretraining_summary.json")
+    parser.add_argument("--trial", type=int, default=0)
+    parser.add_argument("--output_dir", type=str, default="outputs/protocol1a")
+    parser.add_argument("--save_json", action="store_true")
+    parser.add_argument("--verbose", action="store_true")
 
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
@@ -108,7 +119,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--upstream_activation", type=str, default="tanh")
     parser.add_argument("--observer_activation", type=str, default="identity")
-
     parser.add_argument("--upstream_weight_scale", type=float, default=1.0)
     parser.add_argument("--upstream_bias_scale", type=float, default=0.25)
     parser.add_argument("--observer_weight_scale", type=float, default=1.0)
@@ -336,7 +346,9 @@ def _augment_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     if scratch_loss is not None and transfer_loss is not None:
         summary["delta_test_loss"] = float(transfer_loss) - float(scratch_loss)
         summary["relative_test_loss_ratio"] = (
-            None if float(scratch_loss) == 0.0 else float(transfer_loss) / float(scratch_loss)
+            None
+            if float(scratch_loss) == 0.0
+            else float(transfer_loss) / float(scratch_loss)
         )
     else:
         summary["delta_test_loss"] = None
@@ -345,24 +357,110 @@ def _augment_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
+def _build_unified_summary(
+    *,
+    result: Any,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    raw_summary = _augment_summary(result.summary())
+    dataset_summary = result.dataset.summary()
+
+    scratch = dict(raw_summary.get("scratch", {}))
+    pretrain = dict(raw_summary.get("pretrain", {}))
+    adapt_after_pretrain = dict(raw_summary.get("adapt_after_pretrain", {}))
+
+    unified_summary: Dict[str, Any] = {
+        "experiment_name": "protocol1a",
+        "experiment_family": "family1",
+        "experiment_mode": "pretrain_then_adapt_comparison",
+        "trial": int(args.trial),
+        "seed": int(args.dataset_seed),
+        "budget": None,
+        "spent_budget": None,
+        "target_protocol_id": raw_summary.get("target_protocol_id"),
+        "protocol_ids": list(dataset_summary.get("protocol_ids", [])),
+        "protocol_costs": [float(x) for x in args.protocol_costs],
+        "similarities_to_target": [float(x) for x in args.similarities_to_target],
+        "options": {
+            "experiment_mode": "pretrain_then_adapt_comparison",
+            "predictor_type": "mcd",
+            "freeze_shared_upstream_during_adapt": bool(args.freeze_shared_upstream_during_adapt),
+            "device": args.device,
+            "dtype": args.dtype,
+        },
+        "dataset_summary": dataset_summary,
+        "history": [],
+        "phase_results": {
+            "scratch": scratch,
+            "pretrain": pretrain,
+            "adapt_after_pretrain": adapt_after_pretrain,
+        },
+        "n_source_pretrain_samples": int(
+            args.n_pretrain_p1 + args.n_pretrain_p2
+        ),
+        "n_target_adapt_samples": int(args.n_adapt_p3),
+        "n_target_val_samples": int(args.n_val_p3),
+        "n_target_test_samples": int(args.n_test_p3),
+        "final_target_val_loss": adapt_after_pretrain.get("final_val_loss"),
+        "final_target_test_loss": raw_summary.get("transfer_test_loss"),
+        "scratch_target_val_loss": scratch.get("final_val_loss"),
+        "scratch_target_test_loss": raw_summary.get("scratch_test_loss"),
+        "transfer_target_cost": raw_summary.get("transfer_target_cost"),
+        "transfer_total_cost": raw_summary.get("transfer_total_cost"),
+        "scratch_target_cost": raw_summary.get("scratch_target_cost"),
+        "delta_test_loss": raw_summary.get("delta_test_loss"),
+        "relative_test_loss_ratio": raw_summary.get("relative_test_loss_ratio"),
+        "raw_summary": raw_summary,
+    }
+
+    return unified_summary
+
+
+def _save_summary(
+    summary: Dict[str, Any],
+    *,
+    args: argparse.Namespace,
+) -> None:
+    out_dir = _ensure_dir(args.output_dir)
+    if out_dir is None:
+        return
+
+    stem = (
+        f"protocol1a"
+        f"_modepretrain_then_adapt_comparison"
+        f"_familyfamily1"
+        f"_trial{int(args.trial)}"
+        f"_seed{int(args.dataset_seed)}"
+    )
+    output_path = out_dir / f"{stem}.json"
+
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    logger.warning("Saved outputs to %s", output_path)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+
     runner_config = build_runner_config(args)
     result = run_problem_1a_pretraining_comparison(config=runner_config)
 
-    summary = result.summary()
-    summary = _augment_summary(summary)
+    summary = _build_unified_summary(
+        result=result,
+        args=args,
+    )
 
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
-    output_dir = _ensure_dir(args.output_dir)
-    if output_dir is not None:
-        output_path = output_dir / args.save_json_name
-        with output_path.open("w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-        print(f"\nSaved summary to: {output_path}")
+    if args.save_json:
+        _save_summary(summary, args=args)
 
 
 if __name__ == "__main__":

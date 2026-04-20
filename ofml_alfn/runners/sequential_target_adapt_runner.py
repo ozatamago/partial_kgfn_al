@@ -34,7 +34,7 @@ class SequentialTargetAdaptRunnerConfig:
     target_protocol_id:
         The protocol to adapt on, typically protocol_3.
     acquisition_policy:
-        "random" or "fantasy".
+        One of "random", "local_uncertainty", or "fantasy".
     adapt_budget_points:
         Number of sequentially acquired target-side additional points.
     outer_train_config:
@@ -43,7 +43,8 @@ class SequentialTargetAdaptRunnerConfig:
         Training config used inside fantasy scoring.
         Required only when acquisition_policy == "fantasy".
     n_fantasies:
-        Number of fantasy samples per candidate when using fantasy selection.
+        Number of fantasy samples per candidate when using fantasy selection,
+        and number of stochastic predictive draws when using local uncertainty.
     device:
         Torch device string.
     random_seed:
@@ -65,6 +66,7 @@ class SequentialTargetAdaptRecord:
     One row in the learning curve history.
 
     The record is logged before the next acquisition at each step.
+
     Therefore:
     - step_idx = 0 means "before any additional target-side point was acquired"
     - step_idx = t means "after t target-side additional points were acquired"
@@ -101,7 +103,6 @@ def _normalize_protocol_map(
         protocol_map = dict(protocols)
     else:
         protocol_map = {p.protocol_id: p for p in protocols}
-
     if len(protocol_map) == 0:
         raise ValueError("protocols must be non-empty")
     return protocol_map
@@ -170,6 +171,279 @@ def _choose_random_candidate(
     return pool[idx]
 
 
+def _condition_tensor_from_sample(
+    sample: BenchmarkSample,
+    protocol: ProtocolSpec,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    row = [float(sample.condition.values[k]) for k in protocol.condition_keys]
+    return torch.tensor(row, dtype=torch.float32, device=device).unsqueeze(0)
+
+
+def _extract_prediction_tensor(
+    pred_obj: Any,
+    *,
+    device: torch.device,
+    protocol_id: str,
+) -> torch.Tensor:
+    candidate = pred_obj
+
+    if isinstance(candidate, Mapping):
+        for key in ("target", "target_pred", "prediction", "pred", "mean"):
+            if key in candidate:
+                candidate = candidate[key]
+                break
+    elif not torch.is_tensor(candidate):
+        for attr in ("target", "target_pred", "prediction", "pred", "target_value", "mean"):
+            if hasattr(candidate, attr):
+                candidate = getattr(candidate, attr)
+                break
+
+    if not torch.is_tensor(candidate):
+        raise TypeError(
+            f"Could not extract tensor prediction for protocol {protocol_id!r}. "
+            f"Got object of type {type(pred_obj)}"
+        )
+
+    candidate = candidate.detach().to(dtype=torch.float32, device=device)
+    if candidate.ndim == 0:
+        candidate = candidate.view(1, 1)
+    elif candidate.ndim == 1:
+        candidate = candidate.unsqueeze(-1)
+
+    return candidate
+
+
+def _predict_target_batch(
+    predictor: torch.nn.Module,
+    *,
+    protocol: ProtocolSpec,
+    condition_x: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    if hasattr(predictor, "forward_target"):
+        pred_obj = predictor.forward_target(protocol=protocol, condition_x=condition_x)
+        return _extract_prediction_tensor(
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
+        )
+
+    if hasattr(predictor, "forward_protocol"):
+        pred_obj = predictor.forward_protocol(protocol=protocol, condition_x=condition_x)
+        return _extract_prediction_tensor(
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
+        )
+
+    try:
+        pred_obj = predictor(protocol=protocol, condition_x=condition_x)
+        return _extract_prediction_tensor(
+            pred_obj,
+            device=device,
+            protocol_id=protocol.protocol_id,
+        )
+    except TypeError:
+        pass
+
+    pred_obj = predictor(protocol, condition_x)
+    return _extract_prediction_tensor(
+        pred_obj,
+        device=device,
+        protocol_id=protocol.protocol_id,
+    )
+
+
+def _coerce_sample_tensor_list(
+    sample_out: Any,
+    *,
+    device: torch.device,
+) -> List[torch.Tensor]:
+    if torch.is_tensor(sample_out):
+        sample_out = sample_out.detach().to(dtype=torch.float32, device=device)
+        if sample_out.ndim == 0:
+            sample_out = sample_out.view(1, 1)
+        elif sample_out.ndim == 1:
+            sample_out = sample_out.unsqueeze(-1)
+        return [sample_out[i].detach().cpu().reshape(-1) for i in range(sample_out.shape[0])]
+
+    if isinstance(sample_out, Sequence):
+        out: List[torch.Tensor] = []
+        for item in sample_out:
+            if not torch.is_tensor(item):
+                item = torch.as_tensor(item, dtype=torch.float32)
+            item = item.detach().to(dtype=torch.float32, device=device)
+            if item.ndim == 0:
+                item = item.unsqueeze(0)
+            elif item.ndim > 1:
+                item = item.reshape(-1)
+            out.append(item.detach().cpu().clone())
+        return out
+
+    raise TypeError(f"Unsupported predictive sample output type: {type(sample_out)}")
+
+
+def _extract_uncertainty_scalar(obj: Any) -> Optional[float]:
+    value = obj
+
+    if isinstance(value, Mapping):
+        if "uncertainty" in value:
+            value = value["uncertainty"]
+        elif "std" in value:
+            value = value["std"]
+        elif "variance" in value:
+            variance = value["variance"]
+            if torch.is_tensor(variance):
+                variance = variance.detach().to(dtype=torch.float32)
+                return float(torch.sqrt(torch.clamp(variance, min=0.0)).mean().item())
+            variance = float(variance)
+            return float(max(variance, 0.0) ** 0.5)
+        else:
+            return None
+    else:
+        if hasattr(value, "uncertainty"):
+            value = getattr(value, "uncertainty")
+        elif hasattr(value, "std"):
+            value = getattr(value, "std")
+        elif hasattr(value, "variance"):
+            variance = getattr(value, "variance")
+            if torch.is_tensor(variance):
+                variance = variance.detach().to(dtype=torch.float32)
+                return float(torch.sqrt(torch.clamp(variance, min=0.0)).mean().item())
+            variance = float(variance)
+            return float(max(variance, 0.0) ** 0.5)
+        else:
+            return None
+
+    if torch.is_tensor(value):
+        value = value.detach().to(dtype=torch.float32)
+        return float(value.mean().item())
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _predictive_uncertainty_from_hook(
+    predictor: torch.nn.Module,
+    *,
+    protocol: ProtocolSpec,
+    condition_x: torch.Tensor,
+) -> Optional[float]:
+    for method_name in (
+        "predict_protocol_uncertainty",
+        "predict_with_uncertainty",
+        "forward_with_uncertainty",
+    ):
+        method = getattr(predictor, method_name, None)
+        if not callable(method):
+            continue
+
+        try:
+            out = method(protocol=protocol, condition_x=condition_x)
+        except TypeError:
+            try:
+                out = method(protocol, condition_x)
+            except TypeError:
+                continue
+
+        uncertainty = _extract_uncertainty_scalar(out)
+        if uncertainty is not None:
+            return float(uncertainty)
+
+    return None
+
+
+def _sample_predictive_targets(
+    predictor: torch.nn.Module,
+    *,
+    protocol: ProtocolSpec,
+    condition_x: torch.Tensor,
+    n_draws: int,
+    device: torch.device,
+) -> List[torch.Tensor]:
+    for method_name in (
+        "sample_protocol_fantasy_targets",
+        "sample_fantasy_targets",
+        "sample_predictive_targets",
+    ):
+        method = getattr(predictor, method_name, None)
+        if callable(method):
+            sample_out = method(
+                protocol=protocol,
+                condition_x=condition_x,
+                n_fantasies=int(n_draws),
+            )
+            return _coerce_sample_tensor_list(sample_out, device=device)
+
+    predictor_kind = str(getattr(predictor, "predictor_type", "generic")).lower()
+    if predictor_kind == "dkl":
+        raise NotImplementedError(
+            "local_uncertainty for predictor_type='dkl' requires a predictor-side "
+            "uncertainty hook or predictive sampler hook."
+        )
+
+    was_training = predictor.training
+    predictor.train()
+
+    out: List[torch.Tensor] = []
+    with torch.no_grad():
+        for _ in range(int(n_draws)):
+            pred = _predict_target_batch(
+                predictor,
+                protocol=protocol,
+                condition_x=condition_x,
+                device=device,
+            )
+            out.append(pred.detach().cpu().reshape(-1))
+
+    if not was_training:
+        predictor.eval()
+
+    return out
+
+
+def _estimate_local_uncertainty(
+    predictor: torch.nn.Module,
+    *,
+    protocol: ProtocolSpec,
+    sample: BenchmarkSample,
+    n_draws: int,
+    device: torch.device,
+) -> float:
+    condition_x = _condition_tensor_from_sample(sample, protocol, device=device)
+
+    direct_uncertainty = _predictive_uncertainty_from_hook(
+        predictor,
+        protocol=protocol,
+        condition_x=condition_x,
+    )
+    if direct_uncertainty is not None:
+        return float(direct_uncertainty)
+
+    draws = _sample_predictive_targets(
+        predictor,
+        protocol=protocol,
+        condition_x=condition_x,
+        n_draws=n_draws,
+        device=device,
+    )
+    if len(draws) == 0:
+        return 0.0
+    if len(draws) == 1:
+        return 0.0
+
+    stacked = torch.stack(
+        [d.detach().to(dtype=torch.float32).reshape(-1) for d in draws],
+        dim=0,
+    )
+    predictive_std = stacked.std(dim=0, unbiased=False)
+    return float(predictive_std.mean().item())
+
+
 def _select_target_candidate(
     predictor: torch.nn.Module,
     *,
@@ -188,9 +462,9 @@ def _select_target_candidate(
     chosen_sample:
         The actual target sample to acquire next.
     chosen_info:
-        Summary dict about the selected item, or None for random without score.
+        Summary dict about the selected item.
     selection_history_rows:
-        Optional per-round score rows, mainly populated for fantasy mode.
+        Optional per-round score rows.
     """
     policy = str(config.acquisition_policy).lower()
 
@@ -205,6 +479,55 @@ def _select_target_candidate(
             "policy": "random",
         }
         return chosen, chosen_info, []
+
+    if policy == "local_uncertainty":
+        protocol = protocol_map[target_protocol_id]
+        best_sample: Optional[BenchmarkSample] = None
+        best_score = float("-inf")
+        score_rows: List[Dict[str, Any]] = []
+
+        for sample in target_pool:
+            raw_uncertainty = _estimate_local_uncertainty(
+                predictor,
+                protocol=protocol,
+                sample=sample,
+                n_draws=int(config.n_fantasies),
+                device=device,
+            )
+            acquisition_cost = _sample_cost(sample)
+            score = raw_uncertainty / max(float(acquisition_cost), 1e-12)
+
+            score_rows.append(
+                {
+                    "candidate_id": sample.sample_id,
+                    "protocol_id": sample.protocol_id,
+                    "acquisition_cost": float(acquisition_cost),
+                    "raw_uncertainty": float(raw_uncertainty),
+                    "score": float(score),
+                    "mean_improvement": None,
+                    "policy": "local_uncertainty",
+                }
+            )
+
+            if score > best_score:
+                best_score = float(score)
+                best_sample = sample
+
+        if best_sample is None:
+            raise RuntimeError(
+                "Local uncertainty selection returned no candidate even though the target pool is non-empty."
+            )
+
+        chosen_info = {
+            "candidate_id": best_sample.sample_id,
+            "protocol_id": best_sample.protocol_id,
+            "acquisition_cost": _sample_cost(best_sample),
+            "score": float(best_score),
+            "mean_improvement": None,
+            "policy": "local_uncertainty",
+        }
+
+        return best_sample, chosen_info, score_rows
 
     if policy == "fantasy":
         if config.fantasy_train_config is None:
@@ -227,7 +550,7 @@ def _select_target_candidate(
             target_protocol_id=target_protocol_id,
             fantasy_train_config=config.fantasy_train_config,
             n_fantasies=int(config.n_fantasies),
-            remaining_budget=float("inf"),  # budget here is point-count based, not cost based
+            remaining_budget=float("inf"),
             device=device,
         )
 
@@ -270,7 +593,7 @@ def _select_target_candidate(
 
     raise ValueError(
         f"Unsupported acquisition_policy: {config.acquisition_policy!r}. "
-        "Use 'random' or 'fantasy'."
+        "Use 'random', 'local_uncertainty', or 'fantasy'."
     )
 
 
@@ -297,10 +620,12 @@ def run_sequential_target_adapt(
 
     Important note
     --------------
-    We retrain from scratch at every step on the accumulated train set, matching
-    the design used elsewhere in this codebase. Internal validation during
-    training is disabled by passing val_samples=None to train_protocol_predictor;
-    target validation/test are computed explicitly after training.
+    We retrain from scratch at every step on the accumulated train set,
+    matching the design used elsewhere in this codebase.
+
+    Internal validation during training is disabled by passing val_samples=None
+    to train_protocol_predictor; target validation/test are computed explicitly
+    after training.
     """
     if int(config.adapt_budget_points) < 0:
         raise ValueError(
@@ -308,18 +633,16 @@ def run_sequential_target_adapt(
         )
 
     protocol_map = _normalize_protocol_map(protocols)
-
     if config.target_protocol_id not in protocol_map:
         raise KeyError(
             f"Unknown target_protocol_id {config.target_protocol_id!r}. "
             f"Available protocol ids: {sorted(protocol_map.keys())}"
         )
 
-    # Enforce that the sequential pool is target-only
     for sample in target_candidate_pool:
         if sample.protocol_id != config.target_protocol_id:
             raise ValueError(
-                f"target_candidate_pool must contain only target-protocol samples, "
+                "target_candidate_pool must contain only target-protocol samples, "
                 f"but found sample {sample.sample_id!r} from protocol {sample.protocol_id!r}"
             )
 
@@ -339,8 +662,6 @@ def run_sequential_target_adapt(
     while True:
         predictor = predictor_factory()
 
-        # Train on the accumulated data.
-        # Use no internal validation here; explicit target eval comes next.
         if len(current_train_samples) == 0:
             raise ValueError(
                 "initial_train_samples is empty. "
@@ -364,7 +685,6 @@ def run_sequential_target_adapt(
             config=config.outer_train_config,
         )
 
-        # Stop before selecting a new point if budget or pool is exhausted.
         if (
             n_target_points_used >= int(config.adapt_budget_points)
             or len(current_target_pool) == 0
@@ -425,18 +745,20 @@ def run_sequential_target_adapt(
         )
 
         if len(score_rows) > 0:
+            selected_candidate_id = None if chosen_info is None else chosen_info["candidate_id"]
             for row in score_rows:
                 row["step_idx"] = int(n_target_points_used)
+                row["was_selected"] = row["candidate_id"] == selected_candidate_id
             selection_history.extend(score_rows)
         elif chosen_info is not None:
             selection_history.append(
                 {
                     "step_idx": int(n_target_points_used),
+                    "was_selected": True,
                     **chosen_info,
                 }
             )
 
-        # Acquire the selected point
         current_train_samples.append(chosen_sample)
         current_target_pool = [
             s for s in current_target_pool if s.sample_id != chosen_sample.sample_id

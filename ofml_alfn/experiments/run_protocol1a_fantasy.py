@@ -59,7 +59,7 @@ def _parse_args() -> argparse.Namespace:
         "--target_acquisition_policy",
         type=str,
         default="random",
-        choices=["random", "fantasy"],
+        choices=["random", "local_uncertainty", "fantasy"],
     )
     parser.add_argument("--target_adapt_budget", type=int, default=30)
 
@@ -133,6 +133,33 @@ def _parse_args() -> argparse.Namespace:
 
     return parser.parse_args()
 
+
+def _validate_args(args: argparse.Namespace) -> None:
+    policy = str(args.target_acquisition_policy).lower()
+    mode = str(args.experiment_mode)
+    predictor_type = str(args.predictor_type).lower()
+
+    if policy not in {"random", "local_uncertainty", "fantasy"}:
+        raise ValueError(
+            f"Unsupported target_acquisition_policy: {policy}. "
+            "Expected one of: random, local_uncertainty, fantasy."
+        )
+
+    if mode not in {
+        "fantasy_al",
+        "pretrain_then_adapt",
+        "scratch_then_sequential_adapt",
+        "pretrain_then_sequential_adapt",
+    }:
+        raise ValueError(f"Unsupported experiment_mode: {mode}")
+
+    if policy == "local_uncertainty" and predictor_type == "dkl":
+        raise ValueError(
+            "target_acquisition_policy=local_uncertainty currently requires "
+            "predictor_type='mcd' unless you have implemented a predictor-side "
+            "uncertainty hook for DKL."
+        )
+    
 
 def _set_random_seed(seed: int) -> None:
     random.seed(seed)
@@ -296,6 +323,7 @@ def _final_losses_from_history(history_dicts: List[Dict[str, Any]]) -> Tuple[Any
 
 def main() -> None:
     args = _parse_args()
+    _validate_args(args)
 
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,

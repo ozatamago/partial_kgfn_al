@@ -52,6 +52,7 @@ def _normalize_protocol_map(
 
     if len(protocol_map) == 0:
         raise ValueError("protocols must be non-empty")
+
     return protocol_map
 
 
@@ -99,6 +100,7 @@ def _extract_prediction_tensor(
         candidate = candidate.view(1, 1)
     elif candidate.ndim == 1:
         candidate = candidate.unsqueeze(-1)
+
     return candidate
 
 
@@ -154,7 +156,11 @@ def _coerce_fantasy_tensor_list(
             fantasy_out = fantasy_out.view(1, 1)
         elif fantasy_out.ndim == 1:
             fantasy_out = fantasy_out.unsqueeze(-1)
-        return [fantasy_out[i].detach().cpu().reshape(-1) for i in range(fantasy_out.shape[0])]
+
+        return [
+            fantasy_out[i].detach().cpu().reshape(-1)
+            for i in range(fantasy_out.shape[0])
+        ]
 
     if isinstance(fantasy_out, Sequence):
         out: List[torch.Tensor] = []
@@ -185,7 +191,8 @@ def _sample_fantasy_targets(
     """
     Fantasy target sampling strategy.
 
-    Priority:
+    Priority
+    --------
     1. predictor-specific fantasy sampler hook
     2. MCD-style repeated stochastic forward passes
     """
@@ -249,7 +256,7 @@ def _make_fantasy_sample(
 
 def _mean(xs: Sequence[float]) -> float:
     if len(xs) == 0:
-        return float("nan")
+        return 0.0
     return float(sum(xs) / len(xs))
 
 
@@ -271,9 +278,8 @@ def _subsample_candidates_per_protocol(
     """
     Randomly subsample candidates within each protocol.
 
-    This is a simple compute-saving shortcut:
-    after budget filtering, keep at most `max_per_protocol`
-    candidates for each protocol.
+    This is a compute-saving shortcut: after budget filtering, keep at most
+    `max_per_protocol` candidates for each protocol.
     """
     if max_per_protocol <= 0:
         raise ValueError(f"max_per_protocol must be positive, got {max_per_protocol}")
@@ -287,7 +293,6 @@ def _subsample_candidates_per_protocol(
         if len(group) <= max_per_protocol:
             selected.extend(group)
             continue
-
         rng.shuffle(group)
         selected.extend(group[:max_per_protocol])
 
@@ -394,20 +399,33 @@ def select_next_protocol_query(
     n_fantasies: int,
     remaining_budget: float,
     device: torch.device,
+    max_candidates_per_protocol: int = 20,
+    subsample_seed: Optional[int] = 0,
 ) -> ProtocolSelectionResult:
+    """
+    Fantasy-based protocol query selector.
+
+    This selector assumes that policy dispatch has already happened outside this
+    file. In other words, this function is responsible only for the fantasy
+    acquisition policy.
+    """
     protocol_map = _normalize_protocol_map(protocols)
+
     affordable_candidates = filter_affordable_protocol_candidates(
         candidate_pool,
         remaining_budget=remaining_budget,
     )
+    if len(affordable_candidates) == 0:
+        return ProtocolSelectionResult(
+            selected_candidate=None,
+            selected_score=None,
+            all_scores=[],
+        )
 
-    # --------------------------------------------------------------
-    # Compute-saving candidate subsampling:
-    # keep at most 20 random candidates per protocol
-    # --------------------------------------------------------------
     candidate_subset = _subsample_candidates_per_protocol(
         affordable_candidates,
-        max_per_protocol=20,
+        max_per_protocol=int(max_candidates_per_protocol),
+        seed=subsample_seed,
     )
 
     all_scores: List[FantasyCandidateScore] = []
