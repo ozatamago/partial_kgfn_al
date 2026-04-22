@@ -404,6 +404,8 @@ def main() -> None:
             outer_train_config=outer_cfg,
             fantasy_train_config=fantasy_cfg,
             device=str(args.device),
+            acquisition_policy=str(args.target_acquisition_policy),
+            random_seed=int(args.seed + args.trial),
         )
 
         run_result = run_protocol_active_learning(

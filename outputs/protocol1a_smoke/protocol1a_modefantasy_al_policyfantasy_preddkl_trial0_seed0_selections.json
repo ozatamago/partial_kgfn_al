@@ -1,0 +1,2048 @@
+[
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00000",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10246941447257996,
+      0.10246941447257996,
+      0.10246941447257996,
+      0.10246941447257996
+    ],
+    "fantasy_improvements": [
+      -0.00014784932136535645,
+      -0.00014784932136535645,
+      -0.00014784932136535645,
+      -0.00014784932136535645
+    ],
+    "mean_improvement": -0.00014784932136535645,
+    "score": -0.00014784932136535645,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00001",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.1024291068315506,
+      0.1024291068315506,
+      0.1024291068315506,
+      0.1024291068315506
+    ],
+    "fantasy_improvements": [
+      -0.00010754168033599854,
+      -0.00010754168033599854,
+      -0.00010754168033599854,
+      -0.00010754168033599854
+    ],
+    "mean_improvement": -0.00010754168033599854,
+    "score": -0.00010754168033599854,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00009",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10247381776571274,
+      0.10247381776571274,
+      0.10247381776571274,
+      0.10247381776571274
+    ],
+    "fantasy_improvements": [
+      -0.00015225261449813843,
+      -0.00015225261449813843,
+      -0.00015225261449813843,
+      -0.00015225261449813843
+    ],
+    "mean_improvement": -0.00015225261449813843,
+    "score": -0.00015225261449813843,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00004",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10248208791017532,
+      0.10248208791017532,
+      0.10248208791017532,
+      0.10248208791017532
+    ],
+    "fantasy_improvements": [
+      -0.00016052275896072388,
+      -0.00016052275896072388,
+      -0.00016052275896072388,
+      -0.00016052275896072388
+    ],
+    "mean_improvement": -0.00016052275896072388,
+    "score": -0.00016052275896072388,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00006",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10247586667537689,
+      0.10247586667537689,
+      0.10247586667537689,
+      0.10247586667537689
+    ],
+    "fantasy_improvements": [
+      -0.00015430152416229248,
+      -0.00015430152416229248,
+      -0.00015430152416229248,
+      -0.00015430152416229248
+    ],
+    "mean_improvement": -0.00015430152416229248,
+    "score": -0.00015430152416229248,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00002",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.1025034561753273,
+      0.1025034561753273,
+      0.1025034561753273,
+      0.1025034561753273
+    ],
+    "fantasy_improvements": [
+      -0.00018189102411270142,
+      -0.00018189102411270142,
+      -0.00018189102411270142,
+      -0.00018189102411270142
+    ],
+    "mean_improvement": -0.00018189102411270142,
+    "score": -0.00018189102411270142,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00003",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10247815400362015,
+      0.10247815400362015,
+      0.10247815400362015,
+      0.10247815400362015
+    ],
+    "fantasy_improvements": [
+      -0.0001565888524055481,
+      -0.0001565888524055481,
+      -0.0001565888524055481,
+      -0.0001565888524055481
+    ],
+    "mean_improvement": -0.0001565888524055481,
+    "score": -0.0001565888524055481,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00015",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10243380069732666,
+      0.10243380069732666,
+      0.10243380069732666,
+      0.10243380069732666
+    ],
+    "fantasy_improvements": [
+      -0.00011223554611206055,
+      -0.00011223554611206055,
+      -0.00011223554611206055,
+      -0.00011223554611206055
+    ],
+    "mean_improvement": -0.00011223554611206055,
+    "score": -0.00011223554611206055,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00011",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10246160626411438,
+      0.10246160626411438,
+      0.10246160626411438,
+      0.10246160626411438
+    ],
+    "fantasy_improvements": [
+      -0.00014004111289978027,
+      -0.00014004111289978027,
+      -0.00014004111289978027,
+      -0.00014004111289978027
+    ],
+    "mean_improvement": -0.00014004111289978027,
+    "score": -0.00014004111289978027,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00007",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10246903449296951,
+      0.10246903449296951,
+      0.10246903449296951,
+      0.10246903449296951
+    ],
+    "fantasy_improvements": [
+      -0.00014746934175491333,
+      -0.00014746934175491333,
+      -0.00014746934175491333,
+      -0.00014746934175491333
+    ],
+    "mean_improvement": -0.00014746934175491333,
+    "score": -0.00014746934175491333,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00012",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10243187844753265,
+      0.10243187844753265,
+      0.10243187844753265,
+      0.10243187844753265
+    ],
+    "fantasy_improvements": [
+      -0.0001103132963180542,
+      -0.0001103132963180542,
+      -0.0001103132963180542,
+      -0.0001103132963180542
+    ],
+    "mean_improvement": -0.0001103132963180542,
+    "score": -0.0001103132963180542,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00008",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10246575623750687,
+      0.10246575623750687,
+      0.10246575623750687,
+      0.10246575623750687
+    ],
+    "fantasy_improvements": [
+      -0.00014419108629226685,
+      -0.00014419108629226685,
+      -0.00014419108629226685,
+      -0.00014419108629226685
+    ],
+    "mean_improvement": -0.00014419108629226685,
+    "score": -0.00014419108629226685,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00013",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10248759388923645,
+      0.10248759388923645,
+      0.10248759388923645,
+      0.10248759388923645
+    ],
+    "fantasy_improvements": [
+      -0.00016602873802185059,
+      -0.00016602873802185059,
+      -0.00016602873802185059,
+      -0.00016602873802185059
+    ],
+    "mean_improvement": -0.00016602873802185059,
+    "score": -0.00016602873802185059,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00014",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.102469801902771,
+      0.102469801902771,
+      0.102469801902771,
+      0.102469801902771
+    ],
+    "fantasy_improvements": [
+      -0.00014823675155639648,
+      -0.00014823675155639648,
+      -0.00014823675155639648,
+      -0.00014823675155639648
+    ],
+    "mean_improvement": -0.00014823675155639648,
+    "score": -0.00014823675155639648,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00014",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10249592363834381,
+      0.10249592363834381,
+      0.10249592363834381,
+      0.10249592363834381
+    ],
+    "fantasy_improvements": [
+      -0.00017435848712921143,
+      -0.00017435848712921143,
+      -0.00017435848712921143,
+      -0.00017435848712921143
+    ],
+    "mean_improvement": -0.00017435848712921143,
+    "score": -8.717924356460571e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00008",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10247737914323807,
+      0.10247737914323807,
+      0.10247737914323807,
+      0.10247737914323807
+    ],
+    "fantasy_improvements": [
+      -0.00015581399202346802,
+      -0.00015581399202346802,
+      -0.00015581399202346802,
+      -0.00015581399202346802
+    ],
+    "mean_improvement": -0.00015581399202346802,
+    "score": -7.790699601173401e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00013",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10247278213500977,
+      0.10247278213500977,
+      0.10247278213500977,
+      0.10247278213500977
+    ],
+    "fantasy_improvements": [
+      -0.00015121698379516602,
+      -0.00015121698379516602,
+      -0.00015121698379516602,
+      -0.00015121698379516602
+    ],
+    "mean_improvement": -0.00015121698379516602,
+    "score": -7.560849189758301e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00010",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10246805846691132,
+      0.10246805846691132,
+      0.10246805846691132,
+      0.10246805846691132
+    ],
+    "fantasy_improvements": [
+      -0.0001464933156967163,
+      -0.0001464933156967163,
+      -0.0001464933156967163,
+      -0.0001464933156967163
+    ],
+    "mean_improvement": -0.0001464933156967163,
+    "score": -7.324665784835815e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00011",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10248587280511856,
+      0.10248587280511856,
+      0.10248587280511856,
+      0.10248587280511856
+    ],
+    "fantasy_improvements": [
+      -0.00016430765390396118,
+      -0.00016430765390396118,
+      -0.00016430765390396118,
+      -0.00016430765390396118
+    ],
+    "mean_improvement": -0.00016430765390396118,
+    "score": -8.215382695198059e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00012",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10247422754764557,
+      0.10247422754764557,
+      0.10247422754764557,
+      0.10247422754764557
+    ],
+    "fantasy_improvements": [
+      -0.00015266239643096924,
+      -0.00015266239643096924,
+      -0.00015266239643096924,
+      -0.00015266239643096924
+    ],
+    "mean_improvement": -0.00015266239643096924,
+    "score": -7.633119821548462e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00005",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10248561948537827,
+      0.10248561948537827,
+      0.10248561948537827,
+      0.10248561948537827
+    ],
+    "fantasy_improvements": [
+      -0.00016405433416366577,
+      -0.00016405433416366577,
+      -0.00016405433416366577,
+      -0.00016405433416366577
+    ],
+    "mean_improvement": -0.00016405433416366577,
+    "score": -8.202716708183289e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00001",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.1025015115737915,
+      0.1025015115737915,
+      0.1025015115737915,
+      0.1025015115737915
+    ],
+    "fantasy_improvements": [
+      -0.0001799464225769043,
+      -0.0001799464225769043,
+      -0.0001799464225769043,
+      -0.0001799464225769043
+    ],
+    "mean_improvement": -0.0001799464225769043,
+    "score": -8.997321128845215e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00002",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10246725380420685,
+      0.10246725380420685,
+      0.10246725380420685,
+      0.10246725380420685
+    ],
+    "fantasy_improvements": [
+      -0.00014568865299224854,
+      -0.00014568865299224854,
+      -0.00014568865299224854,
+      -0.00014568865299224854
+    ],
+    "mean_improvement": -0.00014568865299224854,
+    "score": -7.284432649612427e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00007",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10245219618082047,
+      0.10245219618082047,
+      0.10245219618082047,
+      0.10245219618082047
+    ],
+    "fantasy_improvements": [
+      -0.00013063102960586548,
+      -0.00013063102960586548,
+      -0.00013063102960586548,
+      -0.00013063102960586548
+    ],
+    "mean_improvement": -0.00013063102960586548,
+    "score": -6.531551480293274e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00009",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10244739055633545,
+      0.10244739055633545,
+      0.10244739055633545,
+      0.10244739055633545
+    ],
+    "fantasy_improvements": [
+      -0.0001258254051208496,
+      -0.0001258254051208496,
+      -0.0001258254051208496,
+      -0.0001258254051208496
+    ],
+    "mean_improvement": -0.0001258254051208496,
+    "score": -6.29127025604248e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00000",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10247800499200821,
+      0.10247800499200821,
+      0.10247800499200821,
+      0.10247800499200821
+    ],
+    "fantasy_improvements": [
+      -0.00015643984079360962,
+      -0.00015643984079360962,
+      -0.00015643984079360962,
+      -0.00015643984079360962
+    ],
+    "mean_improvement": -0.00015643984079360962,
+    "score": -7.821992039680481e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00003",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10244442522525787,
+      0.10244442522525787,
+      0.10244442522525787,
+      0.10244442522525787
+    ],
+    "fantasy_improvements": [
+      -0.00012286007404327393,
+      -0.00012286007404327393,
+      -0.00012286007404327393,
+      -0.00012286007404327393
+    ],
+    "mean_improvement": -0.00012286007404327393,
+    "score": -6.143003702163696e-05,
+    "policy": "fantasy",
+    "was_selected": true
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00004",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10247032344341278,
+      0.10247032344341278,
+      0.10247032344341278,
+      0.10247032344341278
+    ],
+    "fantasy_improvements": [
+      -0.00014875829219818115,
+      -0.00014875829219818115,
+      -0.00014875829219818115,
+      -0.00014875829219818115
+    ],
+    "mean_improvement": -0.00014875829219818115,
+    "score": -7.437914609909058e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00004",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.3475775122642517,
+      0.10666840523481369,
+      0.13222406804561615,
+      0.16339172422885895
+    ],
+    "fantasy_improvements": [
+      -0.2452559471130371,
+      -0.004346840083599091,
+      -0.02990250289440155,
+      -0.06107015907764435
+    ],
+    "mean_improvement": -0.08514386229217052,
+    "score": -0.028381287430723507,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00003",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.17758843302726746,
+      0.18645447492599487,
+      0.11461981385946274,
+      0.17183689773082733
+    ],
+    "fantasy_improvements": [
+      -0.07526686787605286,
+      -0.08413290977478027,
+      -0.012298248708248138,
+      -0.06951533257961273
+    ],
+    "mean_improvement": -0.0603033397346735,
+    "score": -0.020101113244891167,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00007",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.16092365980148315,
+      0.14161571860313416,
+      0.10222457349300385,
+      0.10046830773353577
+    ],
+    "fantasy_improvements": [
+      -0.058602094650268555,
+      -0.039294153451919556,
+      9.69916582107544e-05,
+      0.001853257417678833
+    ],
+    "mean_improvement": -0.02398649975657463,
+    "score": -0.00799549991885821,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00001",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.10980472713708878,
+      0.10548147559165955,
+      0.15530818700790405,
+      0.18616457283496857
+    ],
+    "fantasy_improvements": [
+      -0.007483161985874176,
+      -0.0031599104404449463,
+      -0.05298662185668945,
+      -0.08384300768375397
+    ],
+    "mean_improvement": -0.036868175491690636,
+    "score": -0.012289391830563545,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00005",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.09875893592834473,
+      0.1297655552625656,
+      0.19655191898345947,
+      0.1017097756266594
+    ],
+    "fantasy_improvements": [
+      0.003562629222869873,
+      -0.027443990111351013,
+      -0.09423035383224487,
+      0.0006117895245552063
+    ],
+    "mean_improvement": -0.0293749812990427,
+    "score": -0.009791660433014234,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00002",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.1023215651512146,
+    "fantasy_val_losses": [
+      0.1800725758075714,
+      0.19388893246650696,
+      0.13069942593574524,
+      0.17202386260032654
+    ],
+    "fantasy_improvements": [
+      -0.07775101065635681,
+      -0.09156736731529236,
+      -0.02837786078453064,
+      -0.06970229744911194
+    ],
+    "mean_improvement": -0.06684963405132294,
+    "score": -0.02228321135044098,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00000",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10257605463266373,
+      0.10257605463266373,
+      0.10257605463266373,
+      0.10257605463266373
+    ],
+    "fantasy_improvements": [
+      -0.000149555504322052,
+      -0.000149555504322052,
+      -0.000149555504322052,
+      -0.000149555504322052
+    ],
+    "mean_improvement": -0.000149555504322052,
+    "score": -0.000149555504322052,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00001",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10251889377832413,
+      0.10251889377832413,
+      0.10251889377832413,
+      0.10251889377832413
+    ],
+    "fantasy_improvements": [
+      -9.239464998245239e-05,
+      -9.239464998245239e-05,
+      -9.239464998245239e-05,
+      -9.239464998245239e-05
+    ],
+    "mean_improvement": -9.239464998245239e-05,
+    "score": -9.239464998245239e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00009",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10253632068634033,
+      0.10253632068634033,
+      0.10253632068634033,
+      0.10253632068634033
+    ],
+    "fantasy_improvements": [
+      -0.00010982155799865723,
+      -0.00010982155799865723,
+      -0.00010982155799865723,
+      -0.00010982155799865723
+    ],
+    "mean_improvement": -0.00010982155799865723,
+    "score": -0.00010982155799865723,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00004",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10256979614496231,
+      0.10256979614496231,
+      0.10256979614496231,
+      0.10256979614496231
+    ],
+    "fantasy_improvements": [
+      -0.00014329701662063599,
+      -0.00014329701662063599,
+      -0.00014329701662063599,
+      -0.00014329701662063599
+    ],
+    "mean_improvement": -0.00014329701662063599,
+    "score": -0.00014329701662063599,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00006",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10256052762269974,
+      0.10256052762269974,
+      0.10256052762269974,
+      0.10256052762269974
+    ],
+    "fantasy_improvements": [
+      -0.00013402849435806274,
+      -0.00013402849435806274,
+      -0.00013402849435806274,
+      -0.00013402849435806274
+    ],
+    "mean_improvement": -0.00013402849435806274,
+    "score": -0.00013402849435806274,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00002",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10258527100086212,
+      0.10258527100086212,
+      0.10258527100086212,
+      0.10258527100086212
+    ],
+    "fantasy_improvements": [
+      -0.00015877187252044678,
+      -0.00015877187252044678,
+      -0.00015877187252044678,
+      -0.00015877187252044678
+    ],
+    "mean_improvement": -0.00015877187252044678,
+    "score": -0.00015877187252044678,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00003",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10258817672729492,
+      0.10258817672729492,
+      0.10258817672729492,
+      0.10258817672729492
+    ],
+    "fantasy_improvements": [
+      -0.00016167759895324707,
+      -0.00016167759895324707,
+      -0.00016167759895324707,
+      -0.00016167759895324707
+    ],
+    "mean_improvement": -0.00016167759895324707,
+    "score": -0.00016167759895324707,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00015",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10251427441835403,
+      0.10251427441835403,
+      0.10251427441835403,
+      0.10251427441835403
+    ],
+    "fantasy_improvements": [
+      -8.777529001235962e-05,
+      -8.777529001235962e-05,
+      -8.777529001235962e-05,
+      -8.777529001235962e-05
+    ],
+    "mean_improvement": -8.777529001235962e-05,
+    "score": -8.777529001235962e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00011",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10253896564245224,
+      0.10253896564245224,
+      0.10253896564245224,
+      0.10253896564245224
+    ],
+    "fantasy_improvements": [
+      -0.00011246651411056519,
+      -0.00011246651411056519,
+      -0.00011246651411056519,
+      -0.00011246651411056519
+    ],
+    "mean_improvement": -0.00011246651411056519,
+    "score": -0.00011246651411056519,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00007",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10255634784698486,
+      0.10255634784698486,
+      0.10255634784698486,
+      0.10255634784698486
+    ],
+    "fantasy_improvements": [
+      -0.00012984871864318848,
+      -0.00012984871864318848,
+      -0.00012984871864318848,
+      -0.00012984871864318848
+    ],
+    "mean_improvement": -0.00012984871864318848,
+    "score": -0.00012984871864318848,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00012",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.1024983748793602,
+      0.1024983748793602,
+      0.1024983748793602,
+      0.1024983748793602
+    ],
+    "fantasy_improvements": [
+      -7.187575101852417e-05,
+      -7.187575101852417e-05,
+      -7.187575101852417e-05,
+      -7.187575101852417e-05
+    ],
+    "mean_improvement": -7.187575101852417e-05,
+    "score": -7.187575101852417e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00008",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10254889726638794,
+      0.10254889726638794,
+      0.10254889726638794,
+      0.10254889726638794
+    ],
+    "fantasy_improvements": [
+      -0.00012239813804626465,
+      -0.00012239813804626465,
+      -0.00012239813804626465,
+      -0.00012239813804626465
+    ],
+    "mean_improvement": -0.00012239813804626465,
+    "score": -0.00012239813804626465,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00013",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10257184505462646,
+      0.10257184505462646,
+      0.10257184505462646,
+      0.10257184505462646
+    ],
+    "fantasy_improvements": [
+      -0.00014534592628479004,
+      -0.00014534592628479004,
+      -0.00014534592628479004,
+      -0.00014534592628479004
+    ],
+    "mean_improvement": -0.00014534592628479004,
+    "score": -0.00014534592628479004,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00014",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10254692286252975,
+      0.10254692286252975,
+      0.10254692286252975,
+      0.10254692286252975
+    ],
+    "fantasy_improvements": [
+      -0.00012042373418807983,
+      -0.00012042373418807983,
+      -0.00012042373418807983,
+      -0.00012042373418807983
+    ],
+    "mean_improvement": -0.00012042373418807983,
+    "score": -0.00012042373418807983,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00014",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10261477530002594,
+      0.10261477530002594,
+      0.10261477530002594,
+      0.10261477530002594
+    ],
+    "fantasy_improvements": [
+      -0.00018827617168426514,
+      -0.00018827617168426514,
+      -0.00018827617168426514,
+      -0.00018827617168426514
+    ],
+    "mean_improvement": -0.00018827617168426514,
+    "score": -9.413808584213257e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00008",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10257045179605484,
+      0.10257045179605484,
+      0.10257045179605484,
+      0.10257045179605484
+    ],
+    "fantasy_improvements": [
+      -0.00014395266771316528,
+      -0.00014395266771316528,
+      -0.00014395266771316528,
+      -0.00014395266771316528
+    ],
+    "mean_improvement": -0.00014395266771316528,
+    "score": -7.197633385658264e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00013",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.1025608628988266,
+      0.1025608628988266,
+      0.1025608628988266,
+      0.1025608628988266
+    ],
+    "fantasy_improvements": [
+      -0.00013436377048492432,
+      -0.00013436377048492432,
+      -0.00013436377048492432,
+      -0.00013436377048492432
+    ],
+    "mean_improvement": -0.00013436377048492432,
+    "score": -6.718188524246216e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00010",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.1025625616312027,
+      0.1025625616312027,
+      0.1025625616312027,
+      0.1025625616312027
+    ],
+    "fantasy_improvements": [
+      -0.00013606250286102295,
+      -0.00013606250286102295,
+      -0.00013606250286102295,
+      -0.00013606250286102295
+    ],
+    "mean_improvement": -0.00013606250286102295,
+    "score": -6.803125143051147e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00011",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10257768630981445,
+      0.10257768630981445,
+      0.10257768630981445,
+      0.10257768630981445
+    ],
+    "fantasy_improvements": [
+      -0.00015118718147277832,
+      -0.00015118718147277832,
+      -0.00015118718147277832,
+      -0.00015118718147277832
+    ],
+    "mean_improvement": -0.00015118718147277832,
+    "score": -7.559359073638916e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00012",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10255890339612961,
+      0.10255890339612961,
+      0.10255890339612961,
+      0.10255890339612961
+    ],
+    "fantasy_improvements": [
+      -0.00013240426778793335,
+      -0.00013240426778793335,
+      -0.00013240426778793335,
+      -0.00013240426778793335
+    ],
+    "mean_improvement": -0.00013240426778793335,
+    "score": -6.620213389396667e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00005",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10255537182092667,
+      0.10255537182092667,
+      0.10255537182092667,
+      0.10255537182092667
+    ],
+    "fantasy_improvements": [
+      -0.00012887269258499146,
+      -0.00012887269258499146,
+      -0.00012887269258499146,
+      -0.00012887269258499146
+    ],
+    "mean_improvement": -0.00012887269258499146,
+    "score": -6.443634629249573e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00001",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10262095928192139,
+      0.10262095928192139,
+      0.10262095928192139,
+      0.10262095928192139
+    ],
+    "fantasy_improvements": [
+      -0.00019446015357971191,
+      -0.00019446015357971191,
+      -0.00019446015357971191,
+      -0.00019446015357971191
+    ],
+    "mean_improvement": -0.00019446015357971191,
+    "score": -9.723007678985596e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00002",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10255618393421173,
+      0.10255618393421173,
+      0.10255618393421173,
+      0.10255618393421173
+    ],
+    "fantasy_improvements": [
+      -0.00012968480587005615,
+      -0.00012968480587005615,
+      -0.00012968480587005615,
+      -0.00012968480587005615
+    ],
+    "mean_improvement": -0.00012968480587005615,
+    "score": -6.484240293502808e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00007",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10250511020421982,
+      0.10250511020421982,
+      0.10250511020421982,
+      0.10250511020421982
+    ],
+    "fantasy_improvements": [
+      -7.861107587814331e-05,
+      -7.861107587814331e-05,
+      -7.861107587814331e-05,
+      -7.861107587814331e-05
+    ],
+    "mean_improvement": -7.861107587814331e-05,
+    "score": -3.9305537939071655e-05,
+    "policy": "fantasy",
+    "was_selected": true
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00009",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.1025441586971283,
+      0.1025441586971283,
+      0.1025441586971283,
+      0.1025441586971283
+    ],
+    "fantasy_improvements": [
+      -0.0001176595687866211,
+      -0.0001176595687866211,
+      -0.0001176595687866211,
+      -0.0001176595687866211
+    ],
+    "mean_improvement": -0.0001176595687866211,
+    "score": -5.882978439331055e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00000",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10256141424179077,
+      0.10256141424179077,
+      0.10256141424179077,
+      0.10256141424179077
+    ],
+    "fantasy_improvements": [
+      -0.00013491511344909668,
+      -0.00013491511344909668,
+      -0.00013491511344909668,
+      -0.00013491511344909668
+    ],
+    "mean_improvement": -0.00013491511344909668,
+    "score": -6.745755672454834e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00004",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.1025325208902359,
+      0.1025325208902359,
+      0.1025325208902359,
+      0.1025325208902359
+    ],
+    "fantasy_improvements": [
+      -0.00010602176189422607,
+      -0.00010602176189422607,
+      -0.00010602176189422607,
+      -0.00010602176189422607
+    ],
+    "mean_improvement": -0.00010602176189422607,
+    "score": -5.301088094711304e-05,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00004",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.11369182169437408,
+      0.10495119541883469,
+      0.21015167236328125,
+      0.20548908412456512
+    ],
+    "fantasy_improvements": [
+      -0.01126532256603241,
+      -0.0025246962904930115,
+      -0.10772517323493958,
+      -0.10306258499622345
+    ],
+    "mean_improvement": -0.05614444427192211,
+    "score": -0.01871481475730737,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00003",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10051434487104416,
+      0.2220499962568283,
+      0.20256973803043365,
+      0.09961386024951935
+    ],
+    "fantasy_improvements": [
+      0.0019121542572975159,
+      -0.11962349712848663,
+      -0.10014323890209198,
+      0.0028126388788223267
+    ],
+    "mean_improvement": -0.05376048572361469,
+    "score": -0.017920161907871563,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00007",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.12596428394317627,
+      0.16512390971183777,
+      0.12847845256328583,
+      0.12399845570325851
+    ],
+    "fantasy_improvements": [
+      -0.023537784814834595,
+      -0.0626974105834961,
+      -0.026051953434944153,
+      -0.02157195657491684
+    ],
+    "mean_improvement": -0.03346477635204792,
+    "score": -0.01115492545068264,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00001",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.10165487229824066,
+      0.11598046123981476,
+      0.12691543996334076,
+      0.2060031145811081
+    ],
+    "fantasy_improvements": [
+      0.0007716268301010132,
+      -0.013553962111473083,
+      -0.024488940834999084,
+      -0.10357661545276642
+    ],
+    "mean_improvement": -0.03521197289228439,
+    "score": -0.011737324297428131,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00005",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.13640885055065155,
+      0.1043238714337349,
+      0.09842786192893982,
+      0.11055983603000641
+    ],
+    "fantasy_improvements": [
+      -0.033982351422309875,
+      -0.001897372305393219,
+      0.0039986371994018555,
+      -0.008133336901664734
+    ],
+    "mean_improvement": -0.010003605857491493,
+    "score": -0.0033345352858304977,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_3__adapt_protocol_3__sample_00002",
+    "protocol_id": "protocol_3",
+    "acquisition_cost": 3.0,
+    "current_target_val_loss": 0.10242649912834167,
+    "fantasy_val_losses": [
+      0.20616871118545532,
+      0.10676020383834839,
+      0.15828129649162292,
+      0.09884114563465118
+    ],
+    "fantasy_improvements": [
+      -0.10374221205711365,
+      -0.004333704710006714,
+      -0.05585479736328125,
+      0.0035853534936904907
+    ],
+    "mean_improvement": -0.04008634015917778,
+    "score": -0.013362113386392593,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00000",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10242180526256561,
+      0.10242180526256561,
+      0.10242180526256561,
+      0.10242180526256561
+    ],
+    "fantasy_improvements": [
+      -0.0003384053707122803,
+      -0.0003384053707122803,
+      -0.0003384053707122803,
+      -0.0003384053707122803
+    ],
+    "mean_improvement": -0.0003384053707122803,
+    "score": -0.0003384053707122803,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00001",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.102400042116642,
+      0.102400042116642,
+      0.102400042116642,
+      0.102400042116642
+    ],
+    "fantasy_improvements": [
+      -0.00031664222478866577,
+      -0.00031664222478866577,
+      -0.00031664222478866577,
+      -0.00031664222478866577
+    ],
+    "mean_improvement": -0.00031664222478866577,
+    "score": -0.00031664222478866577,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00009",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10243575274944305,
+      0.10243575274944305,
+      0.10243575274944305,
+      0.10243575274944305
+    ],
+    "fantasy_improvements": [
+      -0.0003523528575897217,
+      -0.0003523528575897217,
+      -0.0003523528575897217,
+      -0.0003523528575897217
+    ],
+    "mean_improvement": -0.0003523528575897217,
+    "score": -0.0003523528575897217,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00004",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10245206952095032,
+      0.10245206952095032,
+      0.10245206952095032,
+      0.10245206952095032
+    ],
+    "fantasy_improvements": [
+      -0.00036866962909698486,
+      -0.00036866962909698486,
+      -0.00036866962909698486,
+      -0.00036866962909698486
+    ],
+    "mean_improvement": -0.00036866962909698486,
+    "score": -0.00036866962909698486,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00006",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.102422796189785,
+      0.102422796189785,
+      0.102422796189785,
+      0.102422796189785
+    ],
+    "fantasy_improvements": [
+      -0.00033939629793167114,
+      -0.00033939629793167114,
+      -0.00033939629793167114,
+      -0.00033939629793167114
+    ],
+    "mean_improvement": -0.00033939629793167114,
+    "score": -0.00033939629793167114,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00002",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10246245563030243,
+      0.10246245563030243,
+      0.10246245563030243,
+      0.10246245563030243
+    ],
+    "fantasy_improvements": [
+      -0.0003790557384490967,
+      -0.0003790557384490967,
+      -0.0003790557384490967,
+      -0.0003790557384490967
+    ],
+    "mean_improvement": -0.0003790557384490967,
+    "score": -0.0003790557384490967,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00003",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10244819521903992,
+      0.10244819521903992,
+      0.10244819521903992,
+      0.10244819521903992
+    ],
+    "fantasy_improvements": [
+      -0.00036479532718658447,
+      -0.00036479532718658447,
+      -0.00036479532718658447,
+      -0.00036479532718658447
+    ],
+    "mean_improvement": -0.00036479532718658447,
+    "score": -0.00036479532718658447,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00015",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10240203142166138,
+      0.10240203142166138,
+      0.10240203142166138,
+      0.10240203142166138
+    ],
+    "fantasy_improvements": [
+      -0.00031863152980804443,
+      -0.00031863152980804443,
+      -0.00031863152980804443,
+      -0.00031863152980804443
+    ],
+    "mean_improvement": -0.00031863152980804443,
+    "score": -0.00031863152980804443,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00011",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10242462158203125,
+      0.10242462158203125,
+      0.10242462158203125,
+      0.10242462158203125
+    ],
+    "fantasy_improvements": [
+      -0.0003412216901779175,
+      -0.0003412216901779175,
+      -0.0003412216901779175,
+      -0.0003412216901779175
+    ],
+    "mean_improvement": -0.0003412216901779175,
+    "score": -0.0003412216901779175,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00007",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10242733359336853,
+      0.10242733359336853,
+      0.10242733359336853,
+      0.10242733359336853
+    ],
+    "fantasy_improvements": [
+      -0.00034393370151519775,
+      -0.00034393370151519775,
+      -0.00034393370151519775,
+      -0.00034393370151519775
+    ],
+    "mean_improvement": -0.00034393370151519775,
+    "score": -0.00034393370151519775,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00012",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10240079462528229,
+      0.10240079462528229,
+      0.10240079462528229,
+      0.10240079462528229
+    ],
+    "fantasy_improvements": [
+      -0.0003173947334289551,
+      -0.0003173947334289551,
+      -0.0003173947334289551,
+      -0.0003173947334289551
+    ],
+    "mean_improvement": -0.0003173947334289551,
+    "score": -0.0003173947334289551,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00008",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10243292897939682,
+      0.10243292897939682,
+      0.10243292897939682,
+      0.10243292897939682
+    ],
+    "fantasy_improvements": [
+      -0.00034952908754348755,
+      -0.00034952908754348755,
+      -0.00034952908754348755,
+      -0.00034952908754348755
+    ],
+    "mean_improvement": -0.00034952908754348755,
+    "score": -0.00034952908754348755,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00013",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10244195908308029,
+      0.10244195908308029,
+      0.10244195908308029,
+      0.10244195908308029
+    ],
+    "fantasy_improvements": [
+      -0.00035855919122695923,
+      -0.00035855919122695923,
+      -0.00035855919122695923,
+      -0.00035855919122695923
+    ],
+    "mean_improvement": -0.00035855919122695923,
+    "score": -0.00035855919122695923,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_1__pretrain_protocol_1__sample_00014",
+    "protocol_id": "protocol_1",
+    "acquisition_cost": 1.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10242463648319244,
+      0.10242463648319244,
+      0.10242463648319244,
+      0.10242463648319244
+    ],
+    "fantasy_improvements": [
+      -0.00034123659133911133,
+      -0.00034123659133911133,
+      -0.00034123659133911133,
+      -0.00034123659133911133
+    ],
+    "mean_improvement": -0.00034123659133911133,
+    "score": -0.00034123659133911133,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00014",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10246705263853073,
+      0.10246705263853073,
+      0.10246705263853073,
+      0.10246705263853073
+    ],
+    "fantasy_improvements": [
+      -0.0003836527466773987,
+      -0.0003836527466773987,
+      -0.0003836527466773987,
+      -0.0003836527466773987
+    ],
+    "mean_improvement": -0.0003836527466773987,
+    "score": -0.00019182637333869934,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00008",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10245117545127869,
+      0.10245117545127869,
+      0.10245117545127869,
+      0.10245117545127869
+    ],
+    "fantasy_improvements": [
+      -0.000367775559425354,
+      -0.000367775559425354,
+      -0.000367775559425354,
+      -0.000367775559425354
+    ],
+    "mean_improvement": -0.000367775559425354,
+    "score": -0.000183887779712677,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00013",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10243016481399536,
+      0.10243016481399536,
+      0.10243016481399536,
+      0.10243016481399536
+    ],
+    "fantasy_improvements": [
+      -0.0003467649221420288,
+      -0.0003467649221420288,
+      -0.0003467649221420288,
+      -0.0003467649221420288
+    ],
+    "mean_improvement": -0.0003467649221420288,
+    "score": -0.0001733824610710144,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00010",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10242390632629395,
+      0.10242390632629395,
+      0.10242390632629395,
+      0.10242390632629395
+    ],
+    "fantasy_improvements": [
+      -0.0003405064344406128,
+      -0.0003405064344406128,
+      -0.0003405064344406128,
+      -0.0003405064344406128
+    ],
+    "mean_improvement": -0.0003405064344406128,
+    "score": -0.0001702532172203064,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00011",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.1024441197514534,
+      0.1024441197514534,
+      0.1024441197514534,
+      0.1024441197514534
+    ],
+    "fantasy_improvements": [
+      -0.00036071985960006714,
+      -0.00036071985960006714,
+      -0.00036071985960006714,
+      -0.00036071985960006714
+    ],
+    "mean_improvement": -0.00036071985960006714,
+    "score": -0.00018035992980003357,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00012",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10244646668434143,
+      0.10244646668434143,
+      0.10244646668434143,
+      0.10244646668434143
+    ],
+    "fantasy_improvements": [
+      -0.00036306679248809814,
+      -0.00036306679248809814,
+      -0.00036306679248809814,
+      -0.00036306679248809814
+    ],
+    "mean_improvement": -0.00036306679248809814,
+    "score": -0.00018153339624404907,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00005",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10244438052177429,
+      0.10244438052177429,
+      0.10244438052177429,
+      0.10244438052177429
+    ],
+    "fantasy_improvements": [
+      -0.00036098062992095947,
+      -0.00036098062992095947,
+      -0.00036098062992095947,
+      -0.00036098062992095947
+    ],
+    "mean_improvement": -0.00036098062992095947,
+    "score": -0.00018049031496047974,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00001",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10247471928596497,
+      0.10247471928596497,
+      0.10247471928596497,
+      0.10247471928596497
+    ],
+    "fantasy_improvements": [
+      -0.0003913193941116333,
+      -0.0003913193941116333,
+      -0.0003913193941116333,
+      -0.0003913193941116333
+    ],
+    "mean_improvement": -0.0003913193941116333,
+    "score": -0.00019565969705581665,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00002",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10242607444524765,
+      0.10242607444524765,
+      0.10242607444524765,
+      0.10242607444524765
+    ],
+    "fantasy_improvements": [
+      -0.0003426745533943176,
+      -0.0003426745533943176,
+      -0.0003426745533943176,
+      -0.0003426745533943176
+    ],
+    "mean_improvement": -0.0003426745533943176,
+    "score": -0.0001713372766971588,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00009",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.1024089902639389,
+      0.1024089902639389,
+      0.1024089902639389,
+      0.1024089902639389
+    ],
+    "fantasy_improvements": [
+      -0.0003255903720855713,
+      -0.0003255903720855713,
+      -0.0003255903720855713,
+      -0.0003255903720855713
+    ],
+    "mean_improvement": -0.0003255903720855713,
+    "score": -0.00016279518604278564,
+    "policy": "fantasy",
+    "was_selected": true
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00000",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.1024436205625534,
+      0.1024436205625534,
+      0.1024436205625534,
+      0.1024436205625534
+    ],
+    "fantasy_improvements": [
+      -0.00036022067070007324,
+      -0.00036022067070007324,
+      -0.00036022067070007324,
+      -0.00036022067070007324
+    ],
+    "mean_improvement": -0.00036022067070007324,
+    "score": -0.00018011033535003662,
+    "policy": "fantasy",
+    "was_selected": false
+  },
+  {
+    "candidate_id": "protocol_2__pretrain_protocol_2__sample_00004",
+    "protocol_id": "protocol_2",
+    "acquisition_cost": 2.0,
+    "current_target_val_loss": 0.10208339989185333,
+    "fantasy_val_losses": [
+      0.10243299603462219,
+      0.10243299603462219,
+      0.10243299603462219,
+      0.10243299603462219
+    ],
+    "fantasy_improvements": [
+      -0.00034959614276885986,
+      -0.00034959614276885986,
+      -0.00034959614276885986,
+      -0.00034959614276885986
+    ],
+    "mean_improvement": -0.00034959614276885986,
+    "score": -0.00017479807138442993,
+    "policy": "fantasy",
+    "was_selected": false
+  }
+]
