@@ -80,6 +80,15 @@ def _parse_args() -> argparse.Namespace:
         default=[0.4, 0.7, 1.0],
         metavar=("S1", "S2", "S3"),
     )
+    parser.add_argument(
+        "--observer_scales",
+        type=float,
+        nargs=3,
+        default=[1.0, 1.0, 1.0],
+        metavar=("G1", "G2", "G3"),
+    )
+    parser.add_argument("--target_noise_std", type=float, default=0.0)
+    parser.add_argument("--source_noise_stds", type=float, nargs=2, default=[0.0, 0.0])
 
     parser.add_argument("--n_pretrain_p1", type=int, default=128)
     parser.add_argument("--n_pretrain_p2", type=int, default=128)
@@ -159,7 +168,31 @@ def _validate_args(args: argparse.Namespace) -> None:
             "predictor_type='mcd' unless you have implemented a predictor-side "
             "uncertainty hook for DKL."
         )
-    
+
+    if len(args.observer_scales) != 3:
+        raise ValueError(
+            f"--observer_scales must have length 3, got {args.observer_scales}"
+        )
+    for i, scale in enumerate(args.observer_scales):
+        if float(scale) <= 0.0:
+            raise ValueError(
+                f"observer_scales[{i}] must be positive, got {scale}"
+            )
+
+    if len(args.source_noise_stds) != 2:
+        raise ValueError(
+            f"--source_noise_stds must have length 2, got {args.source_noise_stds}"
+        )
+    if float(args.target_noise_std) < 0.0:
+        raise ValueError(
+            f"--target_noise_std must be non-negative, got {args.target_noise_std}"
+        )
+    for i, noise_std in enumerate(args.source_noise_stds):
+        if float(noise_std) < 0.0:
+            raise ValueError(
+                f"source_noise_stds[{i}] must be non-negative, got {noise_std}"
+            )
+
 
 def _set_random_seed(seed: int) -> None:
     random.seed(seed)
@@ -299,7 +332,10 @@ def _build_problem1a_dataset_from_args(
         latent_dim=int(args.latent_dim),
         output_dim=int(args.output_dim),
         similarities_to_target=tuple(float(x) for x in args.similarities_to_target),
+        observer_scales=tuple(float(x) for x in args.observer_scales),
         protocol_costs=tuple(float(x) for x in args.protocol_costs),
+        target_noise_std=float(args.target_noise_std),
+        source_noise_stds=tuple(float(x) for x in args.source_noise_stds),
         n_pretrain_p1=int(args.n_pretrain_p1),
         n_pretrain_p2=int(args.n_pretrain_p2),
         n_adapt_p3=int(args.n_adapt_p3),
@@ -357,6 +393,9 @@ def main() -> None:
             "dkl_noise": float(args.dkl_noise),
             "feature_dim": int(args.dkl_feature_dim),
             "kernel_type": str(args.dkl_kernel),
+            "observer_scales": [float(x) for x in args.observer_scales],
+            "target_noise_std": float(args.target_noise_std),
+            "source_noise_stds": [float(x) for x in args.source_noise_stds],
         }
     )
 
@@ -440,6 +479,9 @@ def main() -> None:
             "protocol_ids": list(benchmark.all_protocol_ids),
             "protocol_costs": [float(x) for x in args.protocol_costs],
             "similarities_to_target": [float(x) for x in args.similarities_to_target],
+            "observer_scales": [float(x) for x in args.observer_scales],
+            "target_noise_std": float(args.target_noise_std),
+            "source_noise_stds": [float(x) for x in args.source_noise_stds],
             "options": options,
             "dataset_summary": build_result.summary(),
             "history": history_dicts,
@@ -472,6 +514,9 @@ def main() -> None:
             "protocol_ids": list(benchmark.all_protocol_ids),
             "protocol_costs": [float(x) for x in args.protocol_costs],
             "similarities_to_target": [float(x) for x in args.similarities_to_target],
+            "observer_scales": [float(x) for x in args.observer_scales],
+            "target_noise_std": float(args.target_noise_std),
+            "source_noise_stds": [float(x) for x in args.source_noise_stds],
             "options": options,
             "dataset_summary": build_result.summary(),
             "history": _records_to_dicts(pretrain_result.history),
@@ -519,6 +564,9 @@ def main() -> None:
             "protocol_ids": list(benchmark.all_protocol_ids),
             "protocol_costs": [float(x) for x in args.protocol_costs],
             "similarities_to_target": [float(x) for x in args.similarities_to_target],
+            "observer_scales": [float(x) for x in args.observer_scales],
+            "target_noise_std": float(args.target_noise_std),
+            "source_noise_stds": [float(x) for x in args.source_noise_stds],
             "options": options,
             "dataset_summary": build_result.summary(),
             "history": history_dicts,
@@ -573,6 +621,9 @@ def main() -> None:
             "protocol_ids": list(benchmark.all_protocol_ids),
             "protocol_costs": [float(x) for x in args.protocol_costs],
             "similarities_to_target": [float(x) for x in args.similarities_to_target],
+            "observer_scales": [float(x) for x in args.observer_scales],
+            "target_noise_std": float(args.target_noise_std),
+            "source_noise_stds": [float(x) for x in args.source_noise_stds],
             "options": options,
             "dataset_summary": build_result.summary(),
             "history": history_dicts,

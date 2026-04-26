@@ -1,0 +1,6 @@
+{
+  "root_dir": "/Users/yusuke/Desktop/Program/icsi436/partial_kgfn_al/outputs/protocol1a_plot_temp/pred_dkl/noise_2p0_1p0_0p0",
+  "output_dir": "/Users/yusuke/Desktop/Program/icsi436/partial_kgfn_al/outputs/protocol1a_sweep_plots/pred_dkl/noise_2p0_1p0_0p0",
+  "n_combo_dirs": 2,
+  "metric": "target_test_loss"
+}

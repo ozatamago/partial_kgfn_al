@@ -1,0 +1,266 @@
+{
+  "experiment_name": "protocol1a",
+  "experiment_mode": "fantasy_al",
+  "trial": 0,
+  "seed": 0,
+  "budget": 40.0,
+  "spent_budget": 40.0,
+  "n_rounds_completed": 8,
+  "n_train_initial": 20,
+  "n_train_final": 28,
+  "n_pool_initial": 268,
+  "n_pool_final": 260,
+  "target_protocol_id": "protocol_3",
+  "protocol_ids": [
+    "protocol_1",
+    "protocol_2",
+    "protocol_3"
+  ],
+  "protocol_costs": [
+    1.0,
+    3.0,
+    5.0
+  ],
+  "similarities_to_target": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "observer_scales": [
+    2.0,
+    1.5,
+    1.0
+  ],
+  "target_noise_std": 0.0,
+  "source_noise_stds": [
+    0.5,
+    0.25
+  ],
+  "options": {
+    "predictor_type": "dkl",
+    "hidden": 64,
+    "weight_decay": 1e-06,
+    "nn_lr": 0.001,
+    "nn_weight_decay": 1e-06,
+    "nn_train_steps": 200,
+    "nn_batch_size": 64,
+    "p_drop": 0.1,
+    "mc_samples": 8,
+    "dkl_inference": "exact",
+    "dkl_hidden": 128,
+    "dkl_feature_dim": 32,
+    "dkl_kernel": "rbf",
+    "dkl_noise": 0.0001,
+    "feature_dim": 32,
+    "kernel_type": "rbf",
+    "cand_n_sobol": 256,
+    "selector_objective": "fantasy_gain",
+    "selector_metric": "target_validation_loss",
+    "fantasy_train_steps": 20,
+    "fantasy_topk_candidates": 8,
+    "fantasy_topk_groups": 2,
+    "n_posterior_samples": 64,
+    "aux_loss_weight": 1.0,
+    "sink_loss_weight": 1.0,
+    "nodes_per_step": null,
+    "enable_partial_queries": true,
+    "group_var_reduction": "sum",
+    "use_upstream_first": false,
+    "uncertainty_threshold_tau": 0.5,
+    "experiment_name": "protocol1a",
+    "problem_family": "protocol1a",
+    "experiment_mode": "fantasy_al",
+    "target_protocol_id": "protocol_3",
+    "source_protocol_ids": [
+      "protocol_1",
+      "protocol_2"
+    ],
+    "source_pretrain_split_names": [
+      "pretrain_protocol_1",
+      "pretrain_protocol_2"
+    ],
+    "target_adapt_split_name": "adapt_protocol_3",
+    "target_val_split_name": "val_protocol_3",
+    "target_test_split_name": "test_protocol_3",
+    "selector_holdout_name": "target_validation",
+    "cost_normalize_selector_score": true,
+    "target_validation_loss_fn": null,
+    "sink_only": false,
+    "max_candidates_per_protocol": 20,
+    "depth": 2,
+    "run_source_pretrain": true,
+    "run_target_adapt": true,
+    "pretrain_train_steps": null,
+    "adapt_train_steps": null,
+    "acquisition_rule": "expected_target_val_loss_reduction_per_cost",
+    "debug_selector": true,
+    "target_acquisition_policy": "fantasy",
+    "target_adapt_budget": 30,
+    "observer_scales": [
+      2.0,
+      1.5,
+      1.0
+    ],
+    "target_noise_std": 0.0,
+    "source_noise_stds": [
+      0.5,
+      0.25
+    ]
+  },
+  "dataset_summary": {
+    "problem_name": "problem_1a",
+    "protocol_ids": [
+      "protocol_1",
+      "protocol_2",
+      "protocol_3"
+    ],
+    "target_protocol_id": "protocol_3",
+    "n_samples_total": 672,
+    "split_sizes": {
+      "pretrain_protocol_1": 128,
+      "pretrain_protocol_2": 128,
+      "adapt_protocol_3": 32,
+      "val_protocol_3": 128,
+      "test_protocol_3": 256,
+      "pretrain_all_sources": 256
+    },
+    "similarities_to_target": {
+      "protocol_1": 1.0,
+      "protocol_2": 1.0,
+      "protocol_3": 1.0
+    },
+    "observer_scales": {
+      "protocol_1": 2.0,
+      "protocol_2": 1.5,
+      "protocol_3": 1.0
+    }
+  },
+  "history": [
+    {
+      "round_idx": 0,
+      "spent_budget": 0.0,
+      "remaining_budget": 40.0,
+      "train_size": 20,
+      "pool_size": 268,
+      "target_val_loss": 0.1262432038784027,
+      "target_test_loss": 0.14535394310951233,
+      "chosen_candidate_id": "protocol_3__adapt_protocol_3__sample_00010",
+      "chosen_protocol_id": "protocol_3",
+      "chosen_acquisition_cost": 5.0,
+      "chosen_score": 0.00730806915089488,
+      "chosen_mean_improvement": 0.0365403457544744
+    },
+    {
+      "round_idx": 1,
+      "spent_budget": 5.0,
+      "remaining_budget": 35.0,
+      "train_size": 21,
+      "pool_size": 267,
+      "target_val_loss": 0.13515320420265198,
+      "target_test_loss": 0.1509026139974594,
+      "chosen_candidate_id": "protocol_3__adapt_protocol_3__sample_00028",
+      "chosen_protocol_id": "protocol_3",
+      "chosen_acquisition_cost": 5.0,
+      "chosen_score": 0.009363316837698222,
+      "chosen_mean_improvement": 0.046816584188491106
+    },
+    {
+      "round_idx": 2,
+      "spent_budget": 10.0,
+      "remaining_budget": 30.0,
+      "train_size": 22,
+      "pool_size": 266,
+      "target_val_loss": 0.13153541088104248,
+      "target_test_loss": 0.14851516485214233,
+      "chosen_candidate_id": "protocol_3__adapt_protocol_3__sample_00005",
+      "chosen_protocol_id": "protocol_3",
+      "chosen_acquisition_cost": 5.0,
+      "chosen_score": 0.007483742572367192,
+      "chosen_mean_improvement": 0.03741871286183596
+    },
+    {
+      "round_idx": 3,
+      "spent_budget": 15.0,
+      "remaining_budget": 25.0,
+      "train_size": 23,
+      "pool_size": 265,
+      "target_val_loss": 0.12598007917404175,
+      "target_test_loss": 0.1452139914035797,
+      "chosen_candidate_id": "protocol_3__adapt_protocol_3__sample_00006",
+      "chosen_protocol_id": "protocol_3",
+      "chosen_acquisition_cost": 5.0,
+      "chosen_score": 0.009917083289474249,
+      "chosen_mean_improvement": 0.049585416447371244
+    },
+    {
+      "round_idx": 4,
+      "spent_budget": 20.0,
+      "remaining_budget": 20.0,
+      "train_size": 24,
+      "pool_size": 264,
+      "target_val_loss": 0.13106198608875275,
+      "target_test_loss": 0.14821650087833405,
+      "chosen_candidate_id": "protocol_3__adapt_protocol_3__sample_00001",
+      "chosen_protocol_id": "protocol_3",
+      "chosen_acquisition_cost": 5.0,
+      "chosen_score": 0.00909603275358677,
+      "chosen_mean_improvement": 0.045480163767933846
+    },
+    {
+      "round_idx": 5,
+      "spent_budget": 25.0,
+      "remaining_budget": 15.0,
+      "train_size": 25,
+      "pool_size": 263,
+      "target_val_loss": 0.09924258291721344,
+      "target_test_loss": 0.11040925979614258,
+      "chosen_candidate_id": "protocol_3__adapt_protocol_3__sample_00000",
+      "chosen_protocol_id": "protocol_3",
+      "chosen_acquisition_cost": 5.0,
+      "chosen_score": 0.0072182243224233385,
+      "chosen_mean_improvement": 0.036091121612116694
+    },
+    {
+      "round_idx": 6,
+      "spent_budget": 30.0,
+      "remaining_budget": 10.0,
+      "train_size": 26,
+      "pool_size": 262,
+      "target_val_loss": 0.08404916524887085,
+      "target_test_loss": 0.09545750170946121,
+      "chosen_candidate_id": "protocol_3__adapt_protocol_3__sample_00013",
+      "chosen_protocol_id": "protocol_3",
+      "chosen_acquisition_cost": 5.0,
+      "chosen_score": 0.004616729123517871,
+      "chosen_mean_improvement": 0.023083645617589355
+    },
+    {
+      "round_idx": 7,
+      "spent_budget": 35.0,
+      "remaining_budget": 5.0,
+      "train_size": 27,
+      "pool_size": 261,
+      "target_val_loss": 0.045512497425079346,
+      "target_test_loss": 0.05355893820524216,
+      "chosen_candidate_id": "protocol_3__adapt_protocol_3__sample_00031",
+      "chosen_protocol_id": "protocol_3",
+      "chosen_acquisition_cost": 5.0,
+      "chosen_score": 0.0011006258428096771,
+      "chosen_mean_improvement": 0.005503129214048386
+    },
+    {
+      "round_idx": 8,
+      "spent_budget": 40.0,
+      "remaining_budget": 0.0,
+      "train_size": 28,
+      "pool_size": 260,
+      "target_val_loss": 0.045636214315891266,
+      "target_test_loss": 0.055366575717926025,
+      "chosen_candidate_id": null,
+      "chosen_protocol_id": null,
+      "chosen_acquisition_cost": null,
+      "chosen_score": null,
+      "chosen_mean_improvement": null
+    }
+  ]
+}

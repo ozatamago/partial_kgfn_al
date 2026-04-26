@@ -23,6 +23,8 @@ set -euo pipefail
 #   1. predictor_type
 #   2. protocol_costs
 #   3. similarities_to_target
+#   4. noise setting
+#   5. observer scale setting
 # ============================================================
 
 # ----------------------------
@@ -34,15 +36,37 @@ PREDICTOR_TYPES=(
 )
 
 COST_SETS=(
-  "1 1 3"
-  "1 1 5"
-  "1 1 9"
+  # "1 2 3"
+  # "1 3 5"
+  "1 3 9"
 )
 
 SIMILARITY_SETS=(
-  "0.4 0.7 1.0"
-  "0.5 0.7 1.0"
-  "0.8 0.9 1.0"
+#   "0.4 0.7 1.0"
+#   "0.5 0.7 1.0"
+#   "0.8 0.9 1.0"
+  "1.0 1.0 1.0"
+)
+
+# Format:
+#   "source_noise_p1 source_noise_p2 target_noise_p3"
+NOISE_SETS=(
+  "1.0 0.5 0.0"
+  "2.0 1.0 0.0"
+  "0.5 0.25 0.0"
+)
+
+# Format:
+#   "scale_p1 scale_p2 scale_p3"
+#
+# Example interpretations:
+#   "1.0 1.0 1.0" -> no scale shift
+#   "0.5 1.0 2.0" -> Protocol 1 smaller, Protocol 2 baseline, Protocol 3 larger
+#   "2.0 1.5 1.0" -> sources larger than target
+SCALE_SETS=(
+  "1.0 1.0 1.0"
+  "0.5 1.0 2.0"
+  "2.0 1.5 1.0"
 )
 
 # ----------------------------
@@ -107,7 +131,13 @@ run_protocol1a_cmd() {
   local policy="$3"
   local costs="$4"
   local sims="$5"
-  local output_dir="$6"
+  local src_noise_p1="$6"
+  local src_noise_p2="$7"
+  local tgt_noise_p3="$8"
+  local scale_p1="$9"
+  local scale_p2="${10}"
+  local scale_p3="${11}"
+  local output_dir="${12}"
 
   local outer_steps
   outer_steps="$(outer_steps_for_predictor "$predictor")"
@@ -118,6 +148,9 @@ run_protocol1a_cmd() {
     --target_acquisition_policy "$policy"
     --protocol_costs ${costs}
     --similarities_to_target ${sims}
+    --target_noise_std "$tgt_noise_p3"
+    --source_noise_stds "$src_noise_p1" "$src_noise_p2"
+    --observer_scales "$scale_p1" "$scale_p2" "$scale_p3"
     --n_pretrain_p1 "$N_PRETRAIN_P1"
     --n_pretrain_p2 "$N_PRETRAIN_P2"
     --n_adapt_p3 "$N_ADAPT_P3"
@@ -159,7 +192,7 @@ run_protocol1a_cmd() {
 }
 
 # ------------------------------------------------------------
-# Main 3-level loop
+# Main loop
 # ------------------------------------------------------------
 mkdir -p "$BASE_OUTPUT_DIR"
 
@@ -175,57 +208,88 @@ for predictor in "${PREDICTOR_TYPES[@]}"; do
 
   for costs in "${COST_SETS[@]}"; do
     for sims in "${SIMILARITY_SETS[@]}"; do
-      cost_tag="$(make_tag "$costs")"
-      sim_tag="$(make_tag "$sims")"
+      for noise_triplet in "${NOISE_SETS[@]}"; do
+        read -r SOURCE_NOISE_STD_P1 SOURCE_NOISE_STD_P2 TARGET_NOISE_STD <<< "$noise_triplet"
 
-      combo_output_dir="${BASE_OUTPUT_DIR}/pred_${predictor}/costs_${cost_tag}__sims_${sim_tag}"
-      mkdir -p "$combo_output_dir"
+        for scale_triplet in "${SCALE_SETS[@]}"; do
+          read -r SCALE_P1 SCALE_P2 SCALE_P3 <<< "$scale_triplet"
 
-      log "Start combination"
-      log "predictor           = ${predictor}"
-      log "policies            = ${POLICIES[*]}"
-      log "protocol_costs      = ${costs}"
-      log "similarities_target = ${sims}"
-      log "output_dir          = ${combo_output_dir}"
+          cost_tag="$(make_tag "$costs")"
+          sim_tag="$(make_tag "$sims")"
+          noise_tag="$(make_tag "$noise_triplet")"
+          scale_tag="$(make_tag "$scale_triplet")"
 
-      # ========================================================
-      # Family 1
-      # ========================================================
-      for policy in "${POLICIES[@]}"; do
-        log "Family 1 | ${policy} | scratch_then_sequential_adapt"
-        run_protocol1a_cmd \
-          "$predictor" \
-          "scratch_then_sequential_adapt" \
-          "$policy" \
-          "$costs" \
-          "$sims" \
-          "$combo_output_dir"
+          combo_output_dir="${BASE_OUTPUT_DIR}/pred_${predictor}/costs_${cost_tag}__sims_${sim_tag}__noise_${noise_tag}__scale_${scale_tag}"
+          mkdir -p "$combo_output_dir"
 
-        log "Family 1 | ${policy} | pretrain_then_sequential_adapt"
-        run_protocol1a_cmd \
-          "$predictor" \
-          "pretrain_then_sequential_adapt" \
-          "$policy" \
-          "$costs" \
-          "$sims" \
-          "$combo_output_dir"
+          log "Start combination"
+          log "predictor           = ${predictor}"
+          log "policies            = ${POLICIES[*]}"
+          log "protocol_costs      = ${costs}"
+          log "similarities_target = ${sims}"
+          log "source_noise_stds   = ${SOURCE_NOISE_STD_P1} ${SOURCE_NOISE_STD_P2}"
+          log "target_noise_std    = ${TARGET_NOISE_STD}"
+          log "observer_scales     = ${SCALE_P1} ${SCALE_P2} ${SCALE_P3}"
+          log "output_dir          = ${combo_output_dir}"
+
+          # ========================================================
+          # Family 1
+          # ========================================================
+          for policy in "${POLICIES[@]}"; do
+            log "Family 1 | ${policy} | scratch_then_sequential_adapt"
+            run_protocol1a_cmd \
+              "$predictor" \
+              "scratch_then_sequential_adapt" \
+              "$policy" \
+              "$costs" \
+              "$sims" \
+              "$SOURCE_NOISE_STD_P1" \
+              "$SOURCE_NOISE_STD_P2" \
+              "$TARGET_NOISE_STD" \
+              "$SCALE_P1" \
+              "$SCALE_P2" \
+              "$SCALE_P3" \
+              "$combo_output_dir"
+
+            log "Family 1 | ${policy} | pretrain_then_sequential_adapt"
+            run_protocol1a_cmd \
+              "$predictor" \
+              "pretrain_then_sequential_adapt" \
+              "$policy" \
+              "$costs" \
+              "$sims" \
+              "$SOURCE_NOISE_STD_P1" \
+              "$SOURCE_NOISE_STD_P2" \
+              "$TARGET_NOISE_STD" \
+              "$SCALE_P1" \
+              "$SCALE_P2" \
+              "$SCALE_P3" \
+              "$combo_output_dir"
+          done
+
+          # ========================================================
+          # Family 2
+          # ========================================================
+          for policy in "${POLICIES[@]}"; do
+            log "Family 2 | ${policy} | fantasy_al"
+            run_protocol1a_cmd \
+              "$predictor" \
+              "fantasy_al" \
+              "$policy" \
+              "$costs" \
+              "$sims" \
+              "$SOURCE_NOISE_STD_P1" \
+              "$SOURCE_NOISE_STD_P2" \
+              "$TARGET_NOISE_STD" \
+              "$SCALE_P1" \
+              "$SCALE_P2" \
+              "$SCALE_P3" \
+              "$combo_output_dir"
+          done
+
+          log "Finished combination"
+        done
       done
-
-      # ========================================================
-      # Family 2
-      # ========================================================
-      for policy in "${POLICIES[@]}"; do
-        log "Family 2 | ${policy} | fantasy_al"
-        run_protocol1a_cmd \
-          "$predictor" \
-          "fantasy_al" \
-          "$policy" \
-          "$costs" \
-          "$sims" \
-          "$combo_output_dir"
-      done
-
-      log "Finished combination"
     done
   done
 done

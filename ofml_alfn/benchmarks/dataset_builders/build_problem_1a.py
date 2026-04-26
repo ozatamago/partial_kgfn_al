@@ -155,6 +155,7 @@ class Problem1ADatasetBuilderConfig:
     observer_module_keys: Tuple[str, str, str] = ("observer_1", "observer_2", "observer_3")
 
     similarities_to_target: Tuple[float, float, float] = (0.4, 0.7, 1.0)
+    observer_scales: Tuple[float, float, float] = (1.0, 1.0, 1.0)
     protocol_costs: Tuple[float, float, float] = (1.0, 2.0, 3.0)
 
     n_pretrain_p1: int = 128
@@ -201,6 +202,8 @@ class Problem1ADatasetBuilderConfig:
             raise ValueError("observer_module_keys must have length 3")
         if len(self.similarities_to_target) != 3:
             raise ValueError("similarities_to_target must have length 3")
+        if len(self.observer_scales) != 3:
+            raise ValueError("observer_scales must have length 3")
         if len(self.protocol_costs) != 3:
             raise ValueError("protocol_costs must have length 3")
         if len(self.anchor_seeds) != 2:
@@ -224,6 +227,12 @@ class Problem1ADatasetBuilderConfig:
             raise ValueError(
                 "similarities_to_target[2] must be 1.0 because protocol_3 is the target"
             )
+
+        for i, scale in enumerate(self.observer_scales):
+            if float(scale) <= 0.0:
+                raise ValueError(
+                    f"observer_scales[{i}] must be positive, got {scale}"
+                )
 
         for i, c in enumerate(self.protocol_costs):
             if float(c) < 0.0:
@@ -281,6 +290,7 @@ class Problem1ADatasetBuildResult:
             "n_samples_total": len(self.samples),
             "split_sizes": {s.split_name: len(s.sample_ids) for s in self.splits},
             "similarities_to_target": self.observer_family.similarities_to_target(),
+            "observer_scales": self.observer_family.observer_scales(),
         }
 
 
@@ -437,6 +447,7 @@ def _build_problem_1a_observer_family(
         input_dim=config.latent_dim,
         output_dim=config.output_dim,
         similarities_to_target=config.similarities_to_target,
+        observer_scales=config.observer_scales,
         target_seed=config.target_observer_seed,
         anchor_seeds=config.anchor_seeds,
         weight_scale=config.observer_weight_scale,
@@ -627,6 +638,7 @@ def build_problem_1a_dataset(
         metadata={
             "problem_name": "problem_1a",
             "protocol_costs": config.protocol_costs,
+            "observer_scales": config.observer_scales,
         },
     )
 

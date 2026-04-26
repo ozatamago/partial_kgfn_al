@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
+import torch
+
 from ofml_alfn.benchmarks.module_families.observer_modules import (
     ActivationName,
     LinearObserverModule,
@@ -25,6 +27,13 @@ def _validate_probability(name: str, value: float) -> float:
     return value
 
 
+def _validate_positive_scale(name: str, value: float) -> float:
+    value = float(value)
+    if value <= 0.0:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
 def _validate_unique_strings(name: str, values: Sequence[str]) -> Tuple[str, ...]:
     values = tuple(values)
     if len(values) == 0:
@@ -34,6 +43,33 @@ def _validate_unique_strings(name: str, values: Sequence[str]) -> Tuple[str, ...
     for v in values:
         _validate_nonempty_str(name, v)
     return values
+
+
+def _scale_linear_observer(
+    module: LinearObserverModule,
+    *,
+    scale: float,
+    module_key: Optional[str] = None,
+    metadata_update: Optional[Mapping[str, object]] = None,
+) -> LinearObserverModule:
+    scale = _validate_positive_scale("scale", scale)
+
+    weight = module.linear.weight.detach().clone() * scale
+    bias = module.linear.bias.detach().clone() * scale
+
+    metadata: Dict[str, object] = dict(module.metadata)
+    metadata["observer_scale"] = float(scale)
+    if metadata_update is not None:
+        metadata.update(dict(metadata_update))
+
+    return LinearObserverModule(
+        module_key=module.module_key if module_key is None else module_key,
+        weight=weight,
+        bias=bias,
+        activation=module.activation_name,
+        noise_std=module.noise_std,
+        metadata=metadata,
+    )
 
 
 @dataclass(frozen=True)
@@ -47,7 +83,9 @@ class LinearObserverFamilyConfig:
     - Protocols 1 and 2 own source observers.
     - Each source observer is created by interpolating between the target
       observer and a source-specific anchor observer.
-    - similarity_to_target controls closeness to the target observer.
+    - similarities_to_target controls closeness to the target observer.
+    - observer_scales controls protocol-specific output magnitude after the
+      interpolation step.
 
     Convention
     ----------
@@ -61,13 +99,13 @@ class LinearObserverFamilyConfig:
     output_dim: int = 1
 
     similarities_to_target: Tuple[float, float, float] = (0.4, 0.7, 1.0)
+    observer_scales: Tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     target_seed: int = 0
     anchor_seeds: Tuple[int, int] = (101, 202)
 
     weight_scale: float = 1.0
     bias_scale: float = 0.25
-
     activation: ActivationName = "identity"
 
     target_noise_std: float = 0.0
@@ -85,6 +123,8 @@ class LinearObserverFamilyConfig:
             raise ValueError("module_keys must have length 3")
         if len(self.similarities_to_target) != 3:
             raise ValueError("similarities_to_target must have length 3")
+        if len(self.observer_scales) != 3:
+            raise ValueError("observer_scales must have length 3")
         if len(self.anchor_seeds) != 2:
             raise ValueError("anchor_seeds must have length 2")
         if len(self.source_noise_stds) != 2:
@@ -98,6 +138,9 @@ class LinearObserverFamilyConfig:
         for i, sim in enumerate(self.similarities_to_target):
             _validate_probability(f"similarities_to_target[{i}]", sim)
 
+        for i, scale in enumerate(self.observer_scales):
+            _validate_positive_scale(f"observer_scales[{i}]", scale)
+
         if float(self.similarities_to_target[2]) != 1.0:
             raise ValueError(
                 "similarities_to_target[2] must be 1.0 because protocol 3 is the target"
@@ -107,6 +150,7 @@ class LinearObserverFamilyConfig:
             raise ValueError(
                 f"target_noise_std must be non-negative, got {self.target_noise_std}"
             )
+
         for i, noise_std in enumerate(self.source_noise_stds):
             if noise_std < 0.0:
                 raise ValueError(
@@ -139,18 +183,15 @@ class LinearObserverFamily:
     def __post_init__(self) -> None:
         protocol_ids = tuple(self.observers_by_protocol.keys())
         expected_ids = self.config.protocol_ids
-
         if set(protocol_ids) != set(expected_ids):
             raise ValueError(
                 "observers_by_protocol keys must match config.protocol_ids, got "
                 f"{protocol_ids} vs {expected_ids}"
             )
-
         if self.target_protocol_id not in self.observers_by_protocol:
             raise ValueError(
                 f"target_protocol_id {self.target_protocol_id!r} not found in observers_by_protocol"
             )
-
         object.__setattr__(self, "metadata", dict(self.metadata))
 
     def get(self, protocol_id: str) -> LinearObserverModule:
@@ -177,6 +218,12 @@ class LinearObserverFamily:
             for pid, sim in zip(self.config.protocol_ids, self.config.similarities_to_target)
         }
 
+    def observer_scales(self) -> Dict[str, float]:
+        return {
+            pid: float(scale)
+            for pid, scale in zip(self.config.protocol_ids, self.config.observer_scales)
+        }
+
     def parameter_distances_to_target(self, *, normalize: bool = True) -> Dict[str, float]:
         target = self.target_observer
         out: Dict[str, float] = {}
@@ -192,6 +239,7 @@ class LinearObserverFamily:
             "module_keys": self.config.module_keys,
             "target_protocol_id": self.target_protocol_id,
             "similarities_to_target": self.similarities_to_target(),
+            "observer_scales": self.observer_scales(),
             "normalized_parameter_distance_to_target": self.parameter_distances_to_target(
                 normalize=True
             ),
@@ -260,17 +308,21 @@ def make_problem_1a_linear_observer_family(
     3. Sample one independent anchor observer for protocol 2.
     4. Build source observers by interpolating between the target observer and
        each source-specific anchor observer.
+    5. Apply protocol-specific output scaling.
 
     Interpretation
     --------------
-    If similarity_to_target is high, the source observer is close to the target
-    observer, so transfer from that protocol should be easier.
+    - If similarity_to_target is high, the source observer is close to the
+      target observer, so transfer from that protocol should be easier.
+    - If observer_scale differs across protocols, the observer output magnitude
+      differs even when the underlying shape is similar.
     """
     config = LinearObserverFamilyConfig() if config is None else config
 
     protocol_1, protocol_2, protocol_3 = config.protocol_ids
     module_1, module_2, module_3 = config.module_keys
     sim_1, sim_2, sim_3 = config.similarities_to_target
+    scale_1, scale_2, scale_3 = config.observer_scales
 
     target = _make_target_observer(
         module_key=module_3,
@@ -285,6 +337,7 @@ def make_problem_1a_linear_observer_family(
             "observer_role": "target",
             "protocol_id": protocol_3,
             "similarity_to_target": sim_3,
+            "observer_scale": scale_3,
         },
     )
 
@@ -301,6 +354,7 @@ def make_problem_1a_linear_observer_family(
             "protocol_id": protocol_1,
         },
     )
+
     anchor_2 = _make_anchor_observer(
         module_key=f"{module_2}_anchor",
         input_dim=config.input_dim,
@@ -326,8 +380,10 @@ def make_problem_1a_linear_observer_family(
             "protocol_id": protocol_1,
             "similarity_to_target": sim_1,
             "anchor_module_key": anchor_1.module_key,
+            "observer_scale": scale_1,
         },
     )
+
     source_2 = blend_observers(
         target,
         anchor_2,
@@ -339,7 +395,27 @@ def make_problem_1a_linear_observer_family(
             "protocol_id": protocol_2,
             "similarity_to_target": sim_2,
             "anchor_module_key": anchor_2.module_key,
+            "observer_scale": scale_2,
         },
+    )
+
+    source_1 = _scale_linear_observer(
+        source_1,
+        scale=scale_1,
+        module_key=module_1,
+        metadata_update={"protocol_id": protocol_1, "observer_scale": scale_1},
+    )
+    source_2 = _scale_linear_observer(
+        source_2,
+        scale=scale_2,
+        module_key=module_2,
+        metadata_update={"protocol_id": protocol_2, "observer_scale": scale_2},
+    )
+    target = _scale_linear_observer(
+        target,
+        scale=scale_3,
+        module_key=module_3,
+        metadata_update={"protocol_id": protocol_3, "observer_scale": scale_3},
     )
 
     family = LinearObserverFamily(
@@ -352,7 +428,7 @@ def make_problem_1a_linear_observer_family(
         config=config,
         metadata={
             "family_name": "linear_observers",
-            "construction": "target_plus_anchor_interpolation",
+            "construction": "target_plus_anchor_interpolation_then_output_scaling",
         },
     )
     return family
@@ -366,6 +442,7 @@ def make_problem_1a_linear_observer_family_from_similarities(
     output_dim: int = 1,
     protocol_ids: Tuple[str, str, str] = ("protocol_1", "protocol_2", "protocol_3"),
     module_keys: Tuple[str, str, str] = ("observer_1", "observer_2", "observer_3"),
+    observer_scales: Tuple[float, float, float] = (1.0, 1.0, 1.0),
     target_seed: int = 0,
     anchor_seeds: Tuple[int, int] = (101, 202),
     weight_scale: float = 1.0,
@@ -387,6 +464,7 @@ def make_problem_1a_linear_observer_family_from_similarities(
             _validate_probability("similarity_p2_to_p3", similarity_p2_to_p3),
             1.0,
         ),
+        observer_scales=observer_scales,
         target_seed=target_seed,
         anchor_seeds=anchor_seeds,
         weight_scale=weight_scale,
@@ -405,6 +483,7 @@ def iter_problem_1a_linear_similarity_grid(
     output_dim: int = 1,
     protocol_ids: Tuple[str, str, str] = ("protocol_1", "protocol_2", "protocol_3"),
     module_keys: Tuple[str, str, str] = ("observer_1", "observer_2", "observer_3"),
+    observer_scales: Tuple[float, float, float] = (1.0, 1.0, 1.0),
     target_seed: int = 0,
     anchor_seeds: Tuple[int, int] = (101, 202),
     weight_scale: float = 1.0,
@@ -426,6 +505,7 @@ def iter_problem_1a_linear_similarity_grid(
                 output_dim=output_dim,
                 protocol_ids=protocol_ids,
                 module_keys=module_keys,
+                observer_scales=observer_scales,
                 target_seed=target_seed,
                 anchor_seeds=anchor_seeds,
                 weight_scale=weight_scale,
