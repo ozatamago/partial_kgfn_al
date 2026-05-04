@@ -7,7 +7,7 @@ import logging
 import random
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import torch
 
@@ -52,7 +52,14 @@ def _parse_args() -> argparse.Namespace:
             "pretrain_then_adapt",
             "scratch_then_sequential_adapt",
             "pretrain_then_sequential_adapt",
+            "family3_candidate_pool_ablation",
         ],
+    )
+    parser.add_argument(
+        "--debug_top_k_candidates",
+        type=int,
+        default=5,
+        help="Number of top scored acquisition candidates to print per active-learning round.",
     )
 
     parser.add_argument(
@@ -62,6 +69,18 @@ def _parse_args() -> argparse.Namespace:
         choices=["random", "local_uncertainty", "fantasy"],
     )
     parser.add_argument("--target_adapt_budget", type=int, default=30)
+
+    parser.add_argument(
+        "--candidate_pool_scope",
+        type=str,
+        default="all_protocols",
+        choices=["all_protocols", "target_only"],
+        help=(
+            "Candidate pool scope for family3_candidate_pool_ablation. "
+            "all_protocols uses pool_p1 + pool_p2 + pool_p3. "
+            "target_only uses pool_p3 only."
+        ),
+    )
 
     parser.add_argument("--trial", type=int, default=0)
     parser.add_argument("--budget", type=float, default=40.0)
@@ -140,6 +159,29 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--save_json", action="store_true")
     parser.add_argument("--verbose", action="store_true")
 
+    parser.add_argument(
+        "--debug_progress",
+        action="store_true",
+        help=(
+            "Print additional progress information: dataset split sizes, "
+            "training configs, history tail, and acquisition selections."
+        ),
+    )
+    parser.add_argument(
+        "--debug_history_tail",
+        type=int,
+        default=20,
+        help="Number of recent history records to print when debug_progress is enabled.",
+    )
+    parser.add_argument(
+        "--fantasy_verbose",
+        action="store_true",
+        help=(
+            "Enable verbose logging inside fantasy retraining config. "
+            "Useful when target_acquisition_policy=fantasy."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -147,6 +189,7 @@ def _validate_args(args: argparse.Namespace) -> None:
     policy = str(args.target_acquisition_policy).lower()
     mode = str(args.experiment_mode)
     predictor_type = str(args.predictor_type).lower()
+    candidate_pool_scope = str(args.candidate_pool_scope)
 
     if policy not in {"random", "local_uncertainty", "fantasy"}:
         raise ValueError(
@@ -159,8 +202,15 @@ def _validate_args(args: argparse.Namespace) -> None:
         "pretrain_then_adapt",
         "scratch_then_sequential_adapt",
         "pretrain_then_sequential_adapt",
+        "family3_candidate_pool_ablation",
     }:
         raise ValueError(f"Unsupported experiment_mode: {mode}")
+
+    if candidate_pool_scope not in {"all_protocols", "target_only"}:
+        raise ValueError(
+            f"Unsupported candidate_pool_scope: {candidate_pool_scope}. "
+            "Expected one of: all_protocols, target_only."
+        )
 
     if policy == "local_uncertainty" and predictor_type == "dkl":
         raise ValueError(
@@ -192,6 +242,288 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ValueError(
                 f"source_noise_stds[{i}] must be non-negative, got {noise_std}"
             )
+
+    if int(args.debug_history_tail) < 0:
+        raise ValueError(
+            f"--debug_history_tail must be non-negative, got {args.debug_history_tail}"
+        )
+
+
+def _debug_enabled(args: argparse.Namespace) -> bool:
+    return bool(args.debug_progress or args.verbose)
+
+
+def _debug_log(args: argparse.Namespace, message: str, *values: Any) -> None:
+    if _debug_enabled(args):
+        logger.warning(message, *values)
+
+
+def _json_dumps_compact(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True)
+
+
+def _format_maybe_float(value: Any) -> Any:
+    if isinstance(value, float):
+        return round(value, 8)
+    return value
+
+
+def _sample_protocol_id(sample: BenchmarkSample) -> str:
+    value = getattr(sample, "protocol_id", None)
+    if value is None and isinstance(sample, Mapping):
+        value = sample.get("protocol_id")
+    if value is None:
+        return "unknown"
+    return str(value)
+
+
+def _sample_id(sample: BenchmarkSample) -> str:
+    for name in ("sample_id", "id", "condition_id"):
+        value = getattr(sample, name, None)
+        if value is not None:
+            return str(value)
+        if isinstance(sample, Mapping) and name in sample:
+            return str(sample[name])
+    return "unknown"
+
+
+def _protocol_counts(samples: Sequence[BenchmarkSample]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for sample in samples:
+        pid = _sample_protocol_id(sample)
+        counts[pid] = counts.get(pid, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: kv[0]))
+
+
+def _log_sample_split_debug(
+    args: argparse.Namespace,
+    *,
+    name: str,
+    samples: Sequence[BenchmarkSample],
+) -> None:
+    if not _debug_enabled(args):
+        return
+
+    logger.warning(
+        "[debug] split=%s | n=%d | protocol_counts=%s",
+        name,
+        len(samples),
+        _json_dumps_compact(_protocol_counts(samples)),
+    )
+
+
+def _log_initial_pool_debug(
+    args: argparse.Namespace,
+    *,
+    init_p1: Sequence[BenchmarkSample],
+    pool_p1: Sequence[BenchmarkSample],
+    init_p2: Sequence[BenchmarkSample],
+    pool_p2: Sequence[BenchmarkSample],
+    init_p3: Sequence[BenchmarkSample],
+    pool_p3: Sequence[BenchmarkSample],
+) -> None:
+    if not _debug_enabled(args):
+        return
+
+    logger.warning("[debug] initial/pool split summary")
+    _log_sample_split_debug(args, name="init_p1", samples=init_p1)
+    _log_sample_split_debug(args, name="pool_p1", samples=pool_p1)
+    _log_sample_split_debug(args, name="init_p2", samples=init_p2)
+    _log_sample_split_debug(args, name="pool_p2", samples=pool_p2)
+    _log_sample_split_debug(args, name="init_p3", samples=init_p3)
+    _log_sample_split_debug(args, name="pool_p3", samples=pool_p3)
+
+
+def _training_config_debug_dict(cfg: ProtocolTrainingConfig) -> Dict[str, Any]:
+    raw = asdict(cfg)
+    keep_keys = [
+        "n_steps",
+        "batch_size",
+        "lr",
+        "weight_decay",
+        "loss_name",
+        "grad_clip_norm",
+        "val_every",
+        "early_stopping_patience",
+        "early_stopping_min_delta",
+        "seed",
+        "device",
+        "verbose",
+    ]
+    return {key: raw.get(key) for key in keep_keys if key in raw}
+
+
+def _log_training_config_debug(
+    args: argparse.Namespace,
+    *,
+    outer_cfg: ProtocolTrainingConfig,
+    fantasy_cfg: ProtocolTrainingConfig,
+) -> None:
+    if not _debug_enabled(args):
+        return
+
+    logger.warning(
+        "[debug] outer_train_config=%s",
+        _json_dumps_compact(_training_config_debug_dict(outer_cfg)),
+    )
+    logger.warning(
+        "[debug] fantasy_train_config=%s",
+        _json_dumps_compact(_training_config_debug_dict(fantasy_cfg)),
+    )
+
+
+def _compact_history_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    preferred_keys = [
+        "round",
+        "round_idx",
+        "step",
+        "n_train",
+        "n_pool",
+        "spent_budget",
+        "selected_protocol_id",
+        "selected_sample_id",
+        "selected_cost",
+        "acquisition_score",
+        "train_loss",
+        "val_loss",
+        "test_loss",
+        "target_train_loss",
+        "target_val_loss",
+        "target_test_loss",
+    ]
+
+    compact: Dict[str, Any] = {}
+    for key in preferred_keys:
+        if key in row:
+            compact[key] = _format_maybe_float(row[key])
+
+    if len(compact) == 0:
+        for key, value in row.items():
+            if isinstance(value, (int, float, str, bool)) or value is None:
+                compact[key] = _format_maybe_float(value)
+
+    return compact
+
+
+def _log_history_progress(
+    args: argparse.Namespace,
+    *,
+    label: str,
+    history_dicts: Sequence[Dict[str, Any]],
+) -> None:
+    if not _debug_enabled(args):
+        return
+
+    n_history = len(history_dicts)
+    logger.warning("[debug] %s history length=%d", label, n_history)
+
+    if n_history == 0:
+        return
+
+    tail = int(args.debug_history_tail)
+    if tail == 0:
+        return
+
+    logger.warning("[debug] %s history tail, last %d rows", label, min(tail, n_history))
+    for i, row in enumerate(history_dicts[-tail:], start=max(0, n_history - tail)):
+        logger.warning(
+            "[debug] %s history[%d]=%s",
+            label,
+            i,
+            _json_dumps_compact(_compact_history_row(row)),
+        )
+
+
+def _compact_selection_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    preferred_keys = [
+        "round",
+        "round_idx",
+        "selected_index",
+        "selected_sample_id",
+        "selected_protocol_id",
+        "selected_cost",
+        "spent_budget_before",
+        "spent_budget_after",
+        "acquisition_score",
+        "policy",
+        "candidate_pool_size_before",
+        "candidate_pool_size_after",
+    ]
+
+    compact: Dict[str, Any] = {}
+    for key in preferred_keys:
+        if key in row:
+            compact[key] = _format_maybe_float(row[key])
+
+    if len(compact) == 0:
+        for key, value in row.items():
+            if isinstance(value, (int, float, str, bool)) or value is None:
+                compact[key] = _format_maybe_float(value)
+
+    return compact
+
+
+def _log_selection_progress(
+    args: argparse.Namespace,
+    *,
+    label: str,
+    selection_history: Sequence[Dict[str, Any]],
+) -> None:
+    if not _debug_enabled(args):
+        return
+
+    n_history = len(selection_history)
+    logger.warning("[debug] %s selection_history length=%d", label, n_history)
+
+    if n_history == 0:
+        return
+
+    tail = int(args.debug_history_tail)
+    if tail == 0:
+        return
+
+    logger.warning(
+        "[debug] %s selection_history tail, last %d rows",
+        label,
+        min(tail, n_history),
+    )
+    for i, row in enumerate(selection_history[-tail:], start=max(0, n_history - tail)):
+        logger.warning(
+            "[debug] %s selection_history[%d]=%s",
+            label,
+            i,
+            _json_dumps_compact(_compact_selection_row(row)),
+        )
+
+
+def _log_final_loss_debug(
+    args: argparse.Namespace,
+    *,
+    label: str,
+    summary: Dict[str, Any],
+) -> None:
+    if not _debug_enabled(args):
+        return
+
+    keys = [
+        "final_target_val_loss",
+        "final_target_test_loss",
+        "spent_budget",
+        "n_rounds_completed",
+        "n_train_initial",
+        "n_train_final",
+        "n_pool_initial",
+        "n_pool_final",
+        "n_target_points_used",
+        "target_cost_used",
+    ]
+
+    compact = {
+        key: _format_maybe_float(summary[key])
+        for key in keys
+        if key in summary
+    }
+    logger.warning("[debug] %s final_summary=%s", label, _json_dumps_compact(compact))
 
 
 def _set_random_seed(seed: int) -> None:
@@ -320,7 +652,7 @@ def _fantasy_train_config(args: argparse.Namespace) -> ProtocolTrainingConfig:
         protocol_loss_weights={},
         seed=int(args.seed + args.trial + 1000),
         device=str(args.device),
-        verbose=False,
+        verbose=bool(args.fantasy_verbose),
     )
 
 
@@ -357,22 +689,162 @@ def _final_losses_from_history(history_dicts: List[Dict[str, Any]]) -> Tuple[Any
     return last.get("target_val_loss", None), last.get("target_test_loss", None)
 
 
+def _make_active_learning_summary(
+    *,
+    experiment_mode: str,
+    experiment_family: str,
+    candidate_pool_scope: str,
+    args: argparse.Namespace,
+    benchmark,
+    build_result: Problem1ADatasetBuildResult,
+    target_protocol_id: str,
+    initial_train_samples: Sequence[BenchmarkSample],
+    candidate_pool: Sequence[BenchmarkSample],
+    run_result,
+    history_dicts: List[Dict[str, Any]],
+    options: Dict[str, Any],
+) -> Dict[str, Any]:
+    n_acquisitions = max(
+        0,
+        len(run_result.final_train_samples) - len(initial_train_samples),
+    )
+
+    final_val_loss, final_test_loss = _final_losses_from_history(history_dicts)
+
+    return {
+        "experiment_name": "protocol1a",
+        "experiment_family": experiment_family,
+        "experiment_mode": experiment_mode,
+        "candidate_pool_scope": candidate_pool_scope,
+        "trial": int(args.trial),
+        "seed": int(args.seed),
+        "budget": float(args.budget),
+        "spent_budget": float(run_result.spent_budget),
+        "n_rounds_completed": int(n_acquisitions),
+        "n_train_initial": int(len(initial_train_samples)),
+        "n_train_final": int(len(run_result.final_train_samples)),
+        "n_pool_initial": int(len(candidate_pool)),
+        "n_pool_final": int(len(run_result.final_candidate_pool)),
+        "target_protocol_id": target_protocol_id,
+        "protocol_ids": list(benchmark.all_protocol_ids),
+        "protocol_costs": [float(x) for x in args.protocol_costs],
+        "similarities_to_target": [float(x) for x in args.similarities_to_target],
+        "observer_scales": [float(x) for x in args.observer_scales],
+        "target_noise_std": float(args.target_noise_std),
+        "source_noise_stds": [float(x) for x in args.source_noise_stds],
+        "options": options,
+        "dataset_summary": build_result.summary(),
+        "history": history_dicts,
+        "final_target_val_loss": final_val_loss,
+        "final_target_test_loss": final_test_loss,
+    }
+
+
+def _run_active_learning_mode(
+    *,
+    predictor_factory,
+    protocol_map,
+    initial_train_samples: Sequence[BenchmarkSample],
+    candidate_pool: Sequence[BenchmarkSample],
+    val_p3: Sequence[BenchmarkSample],
+    test_p3: Sequence[BenchmarkSample],
+    target_protocol_id: str,
+    args: argparse.Namespace,
+    outer_cfg: ProtocolTrainingConfig,
+    fantasy_cfg: ProtocolTrainingConfig,
+):
+    runner_cfg = ActiveLearningRunnerConfig(
+        budget=float(args.budget),
+        target_protocol_id=target_protocol_id,
+        n_fantasies=int(args.fantasy_mc_samples),
+        outer_train_config=outer_cfg,
+        fantasy_train_config=fantasy_cfg,
+        device=str(args.device),
+        acquisition_policy=str(args.target_acquisition_policy),
+        random_seed=int(args.seed + args.trial),
+        debug_progress=bool(args.debug_progress),
+        debug_top_k_candidates=int(args.debug_top_k_candidates),
+    )
+
+    _debug_log(
+        args,
+        (
+            "[debug] start active learning | policy=%s | predictor=%s | "
+            "target=%s | n_initial=%d | n_pool=%d | budget=%.4f"
+        ),
+        str(args.target_acquisition_policy),
+        str(args.predictor_type).lower(),
+        target_protocol_id,
+        len(initial_train_samples),
+        len(candidate_pool),
+        float(args.budget),
+    )
+
+    _debug_log(
+        args,
+        "[debug] initial_train_protocol_counts=%s",
+        _json_dumps_compact(_protocol_counts(initial_train_samples)),
+    )
+    _debug_log(
+        args,
+        "[debug] candidate_pool_protocol_counts=%s",
+        _json_dumps_compact(_protocol_counts(candidate_pool)),
+    )
+
+    return run_protocol_active_learning(
+        predictor_factory=predictor_factory,
+        protocols=protocol_map,
+        initial_train_samples=list(initial_train_samples),
+        candidate_pool=list(candidate_pool),
+        target_val_samples=val_p3,
+        target_test_samples=test_p3,
+        config=runner_cfg,
+    )
+
+
 def main() -> None:
     args = _parse_args()
     _validate_args(args)
 
     logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
+        level=logging.INFO if (args.verbose or args.debug_progress) else logging.WARNING,
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
     _set_random_seed(int(args.seed + args.trial))
     device = torch.device(str(args.device))
 
+    _debug_log(
+        args,
+        (
+            "[debug] args | mode=%s | policy=%s | predictor=%s | "
+            "trial=%d | seed=%d | effective_seed=%d | device=%s"
+        ),
+        str(args.experiment_mode),
+        str(args.target_acquisition_policy),
+        str(args.predictor_type).lower(),
+        int(args.trial),
+        int(args.seed),
+        int(args.seed + args.trial),
+        str(args.device),
+    )
+
     build_result = _build_problem1a_dataset_from_args(args)
     benchmark = build_result.benchmark
     protocol_map = benchmark.protocol_map
     target_protocol_id = benchmark.target_protocol_id
+
+    _debug_log(
+        args,
+        "[debug] dataset_summary=%s",
+        _json_dumps_compact(build_result.summary()),
+    )
+    _debug_log(
+        args,
+        "[debug] target_protocol_id=%s | all_protocol_ids=%s",
+        target_protocol_id,
+        _json_dumps_compact(list(benchmark.all_protocol_ids)),
+    )
 
     options = get_fantasy_protocol1a_options(
         overrides={
@@ -380,6 +852,7 @@ def main() -> None:
             "target_protocol_id": target_protocol_id,
             "target_acquisition_policy": str(args.target_acquisition_policy),
             "target_adapt_budget": int(args.target_adapt_budget),
+            "candidate_pool_scope": str(args.candidate_pool_scope),
             "predictor_type": str(args.predictor_type).lower(),
             "hidden": int(args.hidden_dim),
             "depth": int(args.depth),
@@ -405,6 +878,12 @@ def main() -> None:
     val_p3 = list(build_result.samples_in_split("val_protocol_3"))
     test_p3 = list(build_result.samples_in_split("test_protocol_3"))
 
+    _log_sample_split_debug(args, name="pretrain_p1", samples=pretrain_p1)
+    _log_sample_split_debug(args, name="pretrain_p2", samples=pretrain_p2)
+    _log_sample_split_debug(args, name="adapt_p3", samples=adapt_p3)
+    _log_sample_split_debug(args, name="val_p3", samples=val_p3)
+    _log_sample_split_debug(args, name="test_p3", samples=test_p3)
+
     init_p1, pool_p1 = _split_initial_and_pool(
         pretrain_p1,
         n_init=int(args.n_init_p1),
@@ -421,13 +900,35 @@ def main() -> None:
         seed=int(args.seed + args.trial + 33),
     )
 
+    _log_initial_pool_debug(
+        args,
+        init_p1=init_p1,
+        pool_p1=pool_p1,
+        init_p2=init_p2,
+        pool_p2=pool_p2,
+        init_p3=init_p3,
+        pool_p3=pool_p3,
+    )
+
     outer_cfg = _outer_train_config(args)
     fantasy_cfg = _fantasy_train_config(args)
+
+    _log_training_config_debug(
+        args,
+        outer_cfg=outer_cfg,
+        fantasy_cfg=fantasy_cfg,
+    )
 
     predictor_factory = _build_predictor_factory(
         build_result=build_result,
         args=args,
         device=device,
+    )
+
+    _debug_log(
+        args,
+        "[debug] predictor_factory_ready | predictor_type=%s",
+        str(args.predictor_type).lower(),
     )
 
     selection_history: List[Dict[str, Any]] = []
@@ -436,60 +937,124 @@ def main() -> None:
         initial_train_samples: List[BenchmarkSample] = init_p1 + init_p2 + init_p3
         candidate_pool: List[BenchmarkSample] = pool_p1 + pool_p2 + pool_p3
 
-        runner_cfg = ActiveLearningRunnerConfig(
-            budget=float(args.budget),
-            target_protocol_id=target_protocol_id,
-            n_fantasies=int(args.fantasy_mc_samples),
-            outer_train_config=outer_cfg,
-            fantasy_train_config=fantasy_cfg,
-            device=str(args.device),
-            acquisition_policy=str(args.target_acquisition_policy),
-            random_seed=int(args.seed + args.trial),
-        )
-
-        run_result = run_protocol_active_learning(
+        run_result = _run_active_learning_mode(
             predictor_factory=predictor_factory,
-            protocols=protocol_map,
+            protocol_map=protocol_map,
             initial_train_samples=initial_train_samples,
             candidate_pool=candidate_pool,
-            target_val_samples=val_p3,
-            target_test_samples=test_p3,
-            config=runner_cfg,
+            val_p3=val_p3,
+            test_p3=test_p3,
+            target_protocol_id=target_protocol_id,
+            args=args,
+            outer_cfg=outer_cfg,
+            fantasy_cfg=fantasy_cfg,
         )
 
         history_dicts = _records_to_dicts(run_result.history)
-        n_acquisitions = max(
-            0,
-            len(run_result.final_train_samples) - len(initial_train_samples),
+        selection_history = list(getattr(run_result, "selection_history", []))
+
+        _log_history_progress(
+            args,
+            label="fantasy_al",
+            history_dicts=history_dicts,
+        )
+        _log_selection_progress(
+            args,
+            label="fantasy_al",
+            selection_history=selection_history,
         )
 
-        summary = {
-            "experiment_name": "protocol1a",
-            "experiment_mode": "fantasy_al",
-            "trial": int(args.trial),
-            "seed": int(args.seed),
-            "budget": float(args.budget),
-            "spent_budget": float(run_result.spent_budget),
-            "n_rounds_completed": int(n_acquisitions),
-            "n_train_initial": int(len(initial_train_samples)),
-            "n_train_final": int(len(run_result.final_train_samples)),
-            "n_pool_initial": int(len(candidate_pool)),
-            "n_pool_final": int(len(run_result.final_candidate_pool)),
-            "target_protocol_id": target_protocol_id,
-            "protocol_ids": list(benchmark.all_protocol_ids),
-            "protocol_costs": [float(x) for x in args.protocol_costs],
-            "similarities_to_target": [float(x) for x in args.similarities_to_target],
-            "observer_scales": [float(x) for x in args.observer_scales],
-            "target_noise_std": float(args.target_noise_std),
-            "source_noise_stds": [float(x) for x in args.source_noise_stds],
-            "options": options,
-            "dataset_summary": build_result.summary(),
-            "history": history_dicts,
-        }
+        summary = _make_active_learning_summary(
+            experiment_mode="fantasy_al",
+            experiment_family="family2",
+            candidate_pool_scope="all_protocols",
+            args=args,
+            benchmark=benchmark,
+            build_result=build_result,
+            target_protocol_id=target_protocol_id,
+            initial_train_samples=initial_train_samples,
+            candidate_pool=candidate_pool,
+            run_result=run_result,
+            history_dicts=history_dicts,
+            options=options,
+        )
 
-        selection_history = run_result.selection_history
+        _log_final_loss_debug(args, label="fantasy_al", summary=summary)
+
+    elif args.experiment_mode == "family3_candidate_pool_ablation":
+        initial_train_samples = init_p1 + init_p2 + init_p3
+
+        if str(args.candidate_pool_scope) == "all_protocols":
+            candidate_pool = pool_p1 + pool_p2 + pool_p3
+        elif str(args.candidate_pool_scope) == "target_only":
+            candidate_pool = pool_p3
+        else:
+            raise ValueError(
+                f"Unsupported candidate_pool_scope: {args.candidate_pool_scope}"
+            )
+
+        run_result = _run_active_learning_mode(
+            predictor_factory=predictor_factory,
+            protocol_map=protocol_map,
+            initial_train_samples=initial_train_samples,
+            candidate_pool=candidate_pool,
+            val_p3=val_p3,
+            test_p3=test_p3,
+            target_protocol_id=target_protocol_id,
+            args=args,
+            outer_cfg=outer_cfg,
+            fantasy_cfg=fantasy_cfg,
+        )
+
+        history_dicts = _records_to_dicts(run_result.history)
+        selection_history = list(getattr(run_result, "selection_history", []))
+
+        _log_history_progress(
+            args,
+            label="family3_candidate_pool_ablation",
+            history_dicts=history_dicts,
+        )
+        _log_selection_progress(
+            args,
+            label="family3_candidate_pool_ablation",
+            selection_history=selection_history,
+        )
+
+        summary = _make_active_learning_summary(
+            experiment_mode="family3_candidate_pool_ablation",
+            experiment_family="family3",
+            candidate_pool_scope=str(args.candidate_pool_scope),
+            args=args,
+            benchmark=benchmark,
+            build_result=build_result,
+            target_protocol_id=target_protocol_id,
+            initial_train_samples=initial_train_samples,
+            candidate_pool=candidate_pool,
+            run_result=run_result,
+            history_dicts=history_dicts,
+            options=options,
+        )
+
+        _log_final_loss_debug(
+            args,
+            label="family3_candidate_pool_ablation",
+            summary=summary,
+        )
 
     elif args.experiment_mode == "pretrain_then_adapt":
+        _debug_log(
+            args,
+            (
+                "[debug] start pretrain_then_adapt | predictor=%s | "
+                "n_source=%d | n_target_adapt=%d | n_val=%d | n_test=%d"
+            ),
+            str(args.predictor_type).lower(),
+            len(pretrain_p1) + len(pretrain_p2),
+            len(adapt_p3),
+            len(val_p3),
+            len(test_p3),
+        )
+
         pretrain_result = run_pretrain_then_adapt(
             predictor_factory=predictor_factory,
             protocols=protocol_map,
@@ -503,9 +1068,19 @@ def main() -> None:
             ),
         )
 
+        history_dicts = _records_to_dicts(pretrain_result.history)
+
+        _log_history_progress(
+            args,
+            label="pretrain_then_adapt",
+            history_dicts=history_dicts,
+        )
+
         summary = {
             "experiment_name": "protocol1a",
+            "experiment_family": "family1",
             "experiment_mode": "pretrain_then_adapt",
+            "candidate_pool_scope": None,
             "trial": int(args.trial),
             "seed": int(args.seed),
             "budget": None,
@@ -519,14 +1094,29 @@ def main() -> None:
             "source_noise_stds": [float(x) for x in args.source_noise_stds],
             "options": options,
             "dataset_summary": build_result.summary(),
-            "history": _records_to_dicts(pretrain_result.history),
+            "history": history_dicts,
             "n_source_pretrain_samples": pretrain_result.n_source_pretrain_samples,
             "n_target_adapt_samples": pretrain_result.n_target_adapt_samples,
             "final_target_val_loss": pretrain_result.final_target_val_loss,
             "final_target_test_loss": pretrain_result.final_target_test_loss,
         }
 
+        _log_final_loss_debug(args, label="pretrain_then_adapt", summary=summary)
+
     elif args.experiment_mode == "scratch_then_sequential_adapt":
+        _debug_log(
+            args,
+            (
+                "[debug] start scratch_then_sequential_adapt | predictor=%s | "
+                "policy=%s | n_initial=%d | n_pool=%d | adapt_budget_points=%d"
+            ),
+            str(args.predictor_type).lower(),
+            str(args.target_acquisition_policy),
+            len(init_p3),
+            len(pool_p3),
+            int(args.target_adapt_budget),
+        )
+
         seq_cfg = SequentialTargetAdaptRunnerConfig(
             target_protocol_id=target_protocol_id,
             acquisition_policy=str(args.target_acquisition_policy),
@@ -552,10 +1142,24 @@ def main() -> None:
 
         history_dicts = _records_to_dicts(seq_result.history)
         final_val_loss, final_test_loss = _final_losses_from_history(history_dicts)
+        selection_history = list(getattr(seq_result, "selection_history", []))
+
+        _log_history_progress(
+            args,
+            label="scratch_then_sequential_adapt",
+            history_dicts=history_dicts,
+        )
+        _log_selection_progress(
+            args,
+            label="scratch_then_sequential_adapt",
+            selection_history=selection_history,
+        )
 
         summary = {
             "experiment_name": "protocol1a",
+            "experiment_family": "family1",
             "experiment_mode": "scratch_then_sequential_adapt",
+            "candidate_pool_scope": "target_only",
             "trial": int(args.trial),
             "seed": int(args.seed),
             "budget": int(args.target_adapt_budget),
@@ -579,9 +1183,28 @@ def main() -> None:
             "final_target_test_loss": final_test_loss,
         }
 
-        selection_history = seq_result.selection_history
+        _log_final_loss_debug(
+            args,
+            label="scratch_then_sequential_adapt",
+            summary=summary,
+        )
 
     elif args.experiment_mode == "pretrain_then_sequential_adapt":
+        initial_train_samples = list(pretrain_p1) + list(pretrain_p2) + list(init_p3)
+
+        _debug_log(
+            args,
+            (
+                "[debug] start pretrain_then_sequential_adapt | predictor=%s | "
+                "policy=%s | n_initial=%d | n_pool=%d | adapt_budget_points=%d"
+            ),
+            str(args.predictor_type).lower(),
+            str(args.target_acquisition_policy),
+            len(initial_train_samples),
+            len(pool_p3),
+            int(args.target_adapt_budget),
+        )
+
         seq_cfg = SequentialTargetAdaptRunnerConfig(
             target_protocol_id=target_protocol_id,
             acquisition_policy=str(args.target_acquisition_policy),
@@ -595,8 +1218,6 @@ def main() -> None:
             random_seed=int(args.seed + args.trial),
         )
 
-        initial_train_samples = list(pretrain_p1) + list(pretrain_p2) + list(init_p3)
-
         seq_result = run_sequential_target_adapt(
             predictor_factory=predictor_factory,
             protocols=protocol_map,
@@ -609,10 +1230,24 @@ def main() -> None:
 
         history_dicts = _records_to_dicts(seq_result.history)
         final_val_loss, final_test_loss = _final_losses_from_history(history_dicts)
+        selection_history = list(getattr(seq_result, "selection_history", []))
+
+        _log_history_progress(
+            args,
+            label="pretrain_then_sequential_adapt",
+            history_dicts=history_dicts,
+        )
+        _log_selection_progress(
+            args,
+            label="pretrain_then_sequential_adapt",
+            selection_history=selection_history,
+        )
 
         summary = {
             "experiment_name": "protocol1a",
+            "experiment_family": "family1",
             "experiment_mode": "pretrain_then_sequential_adapt",
+            "candidate_pool_scope": "target_only",
             "trial": int(args.trial),
             "seed": int(args.seed),
             "budget": int(args.target_adapt_budget),
@@ -636,7 +1271,11 @@ def main() -> None:
             "final_target_test_loss": final_test_loss,
         }
 
-        selection_history = seq_result.selection_history
+        _log_final_loss_debug(
+            args,
+            label="pretrain_then_sequential_adapt",
+            summary=summary,
+        )
 
     else:
         raise ValueError(f"Unsupported experiment_mode: {args.experiment_mode}")
@@ -651,6 +1290,7 @@ def main() -> None:
             f"protocol1a"
             f"_mode{str(args.experiment_mode)}"
             f"_policy{str(args.target_acquisition_policy)}"
+            f"_pool{str(args.candidate_pool_scope)}"
             f"_pred{str(args.predictor_type).lower()}"
             f"_trial{int(args.trial)}"
             f"_seed{int(args.seed)}"

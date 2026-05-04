@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import copy
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
@@ -15,7 +16,6 @@ except ImportError as e:
         "Please install gpytorch before using this model."
     ) from e
 
-from ofml_alfn.models.full_output_dkl import FullOutputDKLRegressor
 from ofml_alfn.training.train_protocol_predictor import (
     ProtocolEvaluationResult,
     ProtocolTrainingConfig,
@@ -75,7 +75,7 @@ def _extract_sample_z(
 ) -> torch.Tensor:
     if "z" not in sample.metadata:
         raise KeyError(
-            "Problem 1A DKL fitting expects sample.metadata['z'] to exist."
+            "Problem 1A latent supervision expects sample.metadata['z'] to exist."
         )
     return _as_float_tensor(sample.metadata["z"], device=device).reshape(-1)
 
@@ -94,10 +94,6 @@ def _extract_sample_y(
 
 
 class _NodeFeatureExtractor(nn.Module):
-    """
-    Per-node feature extractor: x_node -> phi_node
-    """
-
     def __init__(
         self,
         in_dim: int,
@@ -131,10 +127,6 @@ class _NodeFeatureExtractor(nn.Module):
 
 
 class _NodeExactDKLGP(gpytorch.models.ExactGP):
-    """
-    Exact GP on top of a learned feature extractor.
-    """
-
     def __init__(
         self,
         train_x: torch.Tensor,
@@ -145,12 +137,12 @@ class _NodeExactDKLGP(gpytorch.models.ExactGP):
         kernel_type: str = "rbf",
     ):
         super().__init__(train_x, train_y, likelihood)
-
         self.feature_extractor = feature_extractor
         self.feature_dim = int(feature_dim)
         self.kernel_type = kernel_type.lower()
 
         self.mean_module = gpytorch.means.ConstantMean()
+
         if self.kernel_type == "rbf":
             base_kernel = gpytorch.kernels.RBFKernel(
                 ard_num_dims=self.feature_dim
@@ -165,6 +157,7 @@ class _NodeExactDKLGP(gpytorch.models.ExactGP):
                 f"Unsupported kernel_type: {kernel_type}. "
                 "Use 'rbf' or 'matern'."
             )
+
         self.covar_module = gpytorch.kernels.ScaleKernel(base_kernel)
 
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
@@ -175,10 +168,6 @@ class _NodeExactDKLGP(gpytorch.models.ExactGP):
 
 
 class NodewiseDKLRegressor(nn.Module):
-    """
-    One DKL regressor for one scalar output.
-    """
-
     def __init__(
         self,
         in_dim: int,
@@ -209,6 +198,7 @@ class NodewiseDKLRegressor(nn.Module):
 
         dummy_x = torch.zeros(1, self.in_dim, dtype=torch.get_default_dtype())
         dummy_y = torch.zeros(1, dtype=torch.get_default_dtype())
+
         self.gp = _NodeExactDKLGP(
             train_x=dummy_x,
             train_y=dummy_y,
@@ -217,7 +207,6 @@ class NodewiseDKLRegressor(nn.Module):
             feature_dim=self.feature_dim,
             kernel_type=self.kernel_type,
         )
-
         self._has_real_train_data = False
 
     @property
@@ -280,31 +269,13 @@ class NodewiseDKLRegressor(nn.Module):
 
         self.gp.eval()
         self.likelihood.eval()
+
         with gpytorch.settings.fast_pred_var():
             posterior = self.gp(x)
             mean = posterior.mean.unsqueeze(-1)
             var = posterior.variance.unsqueeze(-1)
+
         return mean, var
-
-    @torch.no_grad()
-    def sample_latent(
-        self,
-        x: torch.Tensor,
-        n_samples: int,
-    ) -> torch.Tensor:
-        if n_samples <= 0:
-            raise ValueError(f"n_samples must be positive, got {n_samples}")
-        if not self._has_real_train_data:
-            raise RuntimeError(
-                "This node DKL regressor has no real training data yet. "
-                "Call set_train_data(...) before sampling."
-            )
-
-        self.gp.eval()
-        self.likelihood.eval()
-        posterior = self.gp(x)
-        samples = posterior.rsample(torch.Size([n_samples]))  # [S, N]
-        return samples.unsqueeze(-1)
 
     @torch.no_grad()
     def sample_observation(
@@ -314,6 +285,7 @@ class NodewiseDKLRegressor(nn.Module):
     ) -> torch.Tensor:
         if n_samples <= 0:
             raise ValueError(f"n_samples must be positive, got {n_samples}")
+
         if not self._has_real_train_data:
             raise RuntimeError(
                 "This node DKL regressor has no real training data yet. "
@@ -326,67 +298,47 @@ class NodewiseDKLRegressor(nn.Module):
         samples = posterior_y.rsample(torch.Size([n_samples]))  # [S, N]
         return samples.unsqueeze(-1)
 
-    def fit_exact_gp(
+
+class _SharedEncoder(nn.Module):
+    def __init__(
         self,
-        *,
-        x: torch.Tensor,
-        y: torch.Tensor,
-        n_steps: int,
-        lr: float,
-        weight_decay: float,
-        grad_clip_norm: Optional[float] = None,
-        verbose: bool = False,
-        prefix: str = "",
-    ) -> Dict[str, float]:
-        self.set_train_data(x=x, y=y, strict=False)
+        input_dim: int,
+        output_dim: int,
+        hidden: int = 256,
+        depth: int = 2,
+    ) -> None:
+        super().__init__()
 
-        self.gp.train()
-        self.likelihood.train()
+        if input_dim <= 0:
+            raise ValueError(f"input_dim must be positive, got {input_dim}")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
+        if depth <= 0:
+            raise ValueError(f"depth must be positive, got {depth}")
 
-        optimizer = torch.optim.Adam(
-            list(self.gp.parameters()) + list(self.likelihood.parameters()),
-            lr=float(lr),
-            weight_decay=float(weight_decay),
-        )
-        mll = self.marginal_log_likelihood()
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+        self.hidden = int(hidden)
+        self.depth = int(depth)
 
-        last_loss = float("nan")
-        for step in range(1, int(n_steps) + 1):
-            optimizer.zero_grad()
-            output = self.gp(self.gp.train_inputs[0])
-            loss = -mll(output, self.gp.train_targets)
-            loss.backward()
+        layers: List[nn.Module] = []
+        in_dim = self.input_dim
+        for _ in range(max(self.depth - 1, 0)):
+            layers.append(nn.Linear(in_dim, self.hidden))
+            layers.append(nn.ReLU())
+            in_dim = self.hidden
+        layers.append(nn.Linear(in_dim, self.output_dim))
+        self.net = nn.Sequential(*layers)
 
-            if grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(
-                    list(self.gp.parameters()) + list(self.likelihood.parameters()),
-                    max_norm=float(grad_clip_norm),
-                )
-
-            optimizer.step()
-            last_loss = float(loss.detach().cpu().item())
-
-            if verbose and (step == 1 or step == n_steps):
-                tag = f"[{prefix}] " if prefix else ""
-                print(f"{tag}step={step} exact_mll_loss={last_loss:.6f}")
-
-        return {"final_exact_mll_loss": float(last_loss)}
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 2 or x.shape[1] != self.input_dim:
+            raise ValueError(
+                f"Expected x of shape [N, {self.input_dim}], got {tuple(x.shape)}"
+            )
+        return self.net(x)
 
 
 class MultiHeadNodewiseDKL(nn.Module):
-    """
-    Problem 1A oriented DKL predictor.
-
-    Structure
-    ---------
-    - shared upstream: x -> z  (vector output)
-    - protocol-specific sink: z -> y  (scalar output)
-
-    Notes
-    -----
-    This class is intentionally specialized for the current Problem 1A path.
-    """
-
     def __init__(
         self,
         *,
@@ -399,6 +351,8 @@ class MultiHeadNodewiseDKL(nn.Module):
         feature_dim: int = 32,
         kernel_type: str = "rbf",
         sink_idx: Optional[int] = None,
+        use_true_latent_supervision: bool = False,
+        latent_supervision_weight: float = 1.0,
     ):
         super().__init__()
 
@@ -425,7 +379,6 @@ class MultiHeadNodewiseDKL(nn.Module):
                 f"sink_idx must be in [0, {self.n_nodes - 1}], got {self.sink_idx}"
             )
 
-        # Kept only for compatibility; Problem 1A hooks below do not rely on them.
         self.parent_nodes = (
             [list(p) for p in parent_nodes] if parent_nodes is not None else None
         )
@@ -435,20 +388,33 @@ class MultiHeadNodewiseDKL(nn.Module):
             else None
         )
 
-        # Shared upstream x -> z (vector output).
-        # node_input_dims[sink_idx] is the latent z dimension.
         self.shared_upstream_output_dim = int(self.node_input_dims[self.sink_idx])
-        self.shared_upstream_model = FullOutputDKLRegressor(
+
+        self.use_true_latent_supervision = bool(use_true_latent_supervision)
+        self.latent_supervision_weight = float(latent_supervision_weight)
+
+        self.shared_encoder = _SharedEncoder(
             input_dim=self.external_input_dim,
             output_dim=self.shared_upstream_output_dim,
             hidden=self.hidden,
             depth=self.depth,
-            feature_dim=self.feature_dim,
-            kernel_type=self.kernel_type,
         )
 
-        # Protocol-specific observer heads z -> y.
         self.protocol_sink_models = nn.ModuleDict()
+
+        self._init_kwargs = {
+            "external_input_dim": int(external_input_dim),
+            "node_input_dims": [int(d) for d in node_input_dims],
+            "parent_nodes": None if parent_nodes is None else [list(p) for p in parent_nodes],
+            "active_input_indices": None if active_input_indices is None else [list(a) for a in active_input_indices],
+            "hidden": int(hidden),
+            "depth": int(depth),
+            "feature_dim": int(feature_dim),
+            "kernel_type": str(kernel_type),
+            "sink_idx": None if sink_idx is None else int(sink_idx),
+            "use_true_latent_supervision": bool(use_true_latent_supervision),
+            "latent_supervision_weight": float(latent_supervision_weight),
+        }
 
     def _device(self) -> torch.device:
         try:
@@ -456,32 +422,77 @@ class MultiHeadNodewiseDKL(nn.Module):
         except StopIteration:
             return torch.device("cpu")
 
-    def _ensure_protocol_sink_model(
+    def _unique_trainable_parameters(self) -> List[nn.Parameter]:
+        unique: List[nn.Parameter] = []
+        seen = set()
+        for p in self.parameters():
+            if not p.requires_grad:
+                continue
+            pid = id(p)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            unique.append(p)
+        return unique
+
+    def __deepcopy__(self, memo):
+        copied = self.__class__(**copy.deepcopy(self._init_kwargs, memo))
+        copied.to(self._device())
+
+        for protocol_id, heads in self.protocol_sink_models.items():
+            copied._ensure_protocol_sink_models(protocol_id, len(heads))
+
+        copied.load_state_dict(copy.deepcopy(self.state_dict(), memo), strict=False)
+        memo[id(self)] = copied
+        return copied
+
+    def _ensure_protocol_sink_models(
         self,
         protocol_id: str,
-    ) -> NodewiseDKLRegressor:
-        if protocol_id not in self.protocol_sink_models:
-            self.protocol_sink_models[protocol_id] = NodewiseDKLRegressor(
-                in_dim=self.shared_upstream_output_dim,
-                hidden=self.hidden,
-                feature_dim=self.feature_dim,
-                kernel_type=self.kernel_type,
-            )
-        return self.protocol_sink_models[protocol_id]
+        output_dim: int,
+    ) -> nn.ModuleList:
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
 
-    def _problem1a_fit_datasets(
+        if protocol_id not in self.protocol_sink_models:
+            self.protocol_sink_models[protocol_id] = nn.ModuleList(
+                [
+                    NodewiseDKLRegressor(
+                        in_dim=self.shared_upstream_output_dim,
+                        hidden=self.hidden,
+                        feature_dim=self.feature_dim,
+                        kernel_type=self.kernel_type,
+                    )
+                    for _ in range(int(output_dim))
+                ]
+            )
+
+        heads = self.protocol_sink_models[protocol_id]
+        if len(heads) != int(output_dim):
+            raise ValueError(
+                f"Protocol {protocol_id!r} already has {len(heads)} sink heads, "
+                f"but output_dim={output_dim} was requested."
+            )
+
+        return heads
+
+    def _group_problem1a_train_data(
         self,
         *,
         protocols: Mapping[str, ProtocolSpec],
         train_samples: Sequence[BenchmarkSample],
         device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> Tuple[
+        Dict[str, Tuple[torch.Tensor, torch.Tensor]],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
         if len(train_samples) == 0:
             raise ValueError("train_samples must be non-empty")
 
-        upstream_x_rows: List[torch.Tensor] = []
-        upstream_z_rows: List[torch.Tensor] = []
-        sink_data: Dict[str, Tuple[List[torch.Tensor], List[torch.Tensor]]] = {}
+        grouped_xy: Dict[str, Tuple[List[torch.Tensor], List[torch.Tensor]]] = {}
+        all_x_rows: List[torch.Tensor] = []
+        all_z_rows: List[torch.Tensor] = []
 
         for sample in train_samples:
             if sample.protocol_id not in protocols:
@@ -491,28 +502,31 @@ class MultiHeadNodewiseDKL(nn.Module):
 
             protocol = protocols[sample.protocol_id]
             x = _extract_sample_x(sample, protocol=protocol, device=device)
-            z = _extract_sample_z(sample, device=device)
             y = _extract_sample_y(sample, device=device)
 
-            upstream_x_rows.append(x)
-            upstream_z_rows.append(z)
+            if sample.protocol_id not in grouped_xy:
+                grouped_xy[sample.protocol_id] = ([], [])
+            grouped_xy[sample.protocol_id][0].append(x)
+            grouped_xy[sample.protocol_id][1].append(y)
 
-            if sample.protocol_id not in sink_data:
-                sink_data[sample.protocol_id] = ([], [])
-            sink_data[sample.protocol_id][0].append(z)
-            sink_data[sample.protocol_id][1].append(y)
+            if self.use_true_latent_supervision:
+                all_x_rows.append(x)
+                all_z_rows.append(_extract_sample_z(sample, device=device))
 
-        upstream_x = torch.stack(upstream_x_rows, dim=0)
-        upstream_z = torch.stack(upstream_z_rows, dim=0)
-
-        sink_tensors: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
-        for protocol_id, (zs, ys) in sink_data.items():
-            sink_tensors[protocol_id] = (
-                torch.stack(zs, dim=0),
+        grouped_tensors: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        for protocol_id, (xs, ys) in grouped_xy.items():
+            grouped_tensors[protocol_id] = (
+                torch.stack(xs, dim=0),
                 torch.stack(ys, dim=0),
             )
 
-        return upstream_x, upstream_z, sink_tensors
+        all_x = None
+        all_true_z = None
+        if self.use_true_latent_supervision:
+            all_x = torch.stack(all_x_rows, dim=0)
+            all_true_z = torch.stack(all_z_rows, dim=0)
+
+        return grouped_tensors, all_x, all_true_z
 
     def forward_target(
         self,
@@ -533,12 +547,11 @@ class MultiHeadNodewiseDKL(nn.Module):
                 f"samples first."
             )
 
-        z_mean = self.shared_upstream_model.forward_target(
-            protocol=protocol,
-            condition_x=condition_x,
-        )
-        sink_model = self.protocol_sink_models[protocol.protocol_id]
-        return sink_model(z_mean)
+        z_mean = self.shared_encoder(condition_x)
+        heads = self.protocol_sink_models[protocol.protocol_id]
+
+        preds = [head(z_mean) for head in heads]
+        return torch.cat(preds, dim=-1)
 
     def forward_protocol(
         self,
@@ -558,6 +571,7 @@ class MultiHeadNodewiseDKL(nn.Module):
     ) -> torch.Tensor:
         if n_fantasies <= 0:
             raise ValueError(f"n_fantasies must be positive, got {n_fantasies}")
+
         if protocol.protocol_id not in self.protocol_sink_models:
             raise RuntimeError(
                 f"No protocol-specific sink model is available for protocol "
@@ -565,20 +579,188 @@ class MultiHeadNodewiseDKL(nn.Module):
                 f"samples first."
             )
 
-        z_samples = self.shared_upstream_model.sample_protocol_fantasy_targets(
-            protocol=protocol,
-            condition_x=condition_x,
-            n_fantasies=n_fantasies,
-        )  # [S, N, Dz]
+        z_mean = self.shared_encoder(condition_x)
+        heads = self.protocol_sink_models[protocol.protocol_id]
 
-        sink_model = self.protocol_sink_models[protocol.protocol_id]
-        y_samples: List[torch.Tensor] = []
-        for s in range(n_fantasies):
-            z_s = z_samples[s]              # [N, Dz]
-            y_s = sink_model.sample_observation(z_s, n_samples=1)[0]  # [N, 1]
-            y_samples.append(y_s)
+        samples_per_output = [
+            head.sample_observation(z_mean, n_samples=n_fantasies)
+            for head in heads
+        ]
+        return torch.cat(samples_per_output, dim=-1)
 
-        return torch.stack(y_samples, dim=0)  # [S, N, 1]
+    def fit_protocol_dataset(
+        self,
+        *,
+        protocols: Mapping[str, ProtocolSpec],
+        train_samples: Sequence[BenchmarkSample],
+        val_samples: Optional[Sequence[BenchmarkSample]],
+        config: ProtocolTrainingConfig,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+    ) -> ProtocolTrainingResult:
+        del optimizer
+
+        if len(train_samples) == 0:
+            raise ValueError("train_samples must be non-empty")
+
+        device = self._device()
+
+        grouped_xy, all_x, all_true_z = self._group_problem1a_train_data(
+            protocols=protocols,
+            train_samples=train_samples,
+            device=device,
+        )
+
+        protocol_output_dims: Dict[str, int] = {}
+        for protocol_id, (_, y) in grouped_xy.items():
+            if y.ndim != 2:
+                raise ValueError(
+                    f"Expected y tensor to be 2D for protocol {protocol_id!r}, "
+                    f"got {tuple(y.shape)}"
+                )
+            protocol_output_dims[protocol_id] = int(y.shape[1])
+            self._ensure_protocol_sink_models(protocol_id, int(y.shape[1]))
+
+        opt = torch.optim.Adam(
+            self._unique_trainable_parameters(),
+            lr=float(config.lr),
+            weight_decay=float(config.weight_decay),
+        )
+
+        history: List[Dict[str, float]] = []
+        last_joint_loss = float("nan")
+        last_latent_loss = float("nan")
+
+        best_state_dict: Optional[Dict[str, torch.Tensor]] = None
+        best_val_loss: Optional[float] = None
+        best_step = int(config.n_steps)
+
+        for step in range(1, int(config.n_steps) + 1):
+            opt.zero_grad()
+
+            joint_loss = torch.tensor(0.0, dtype=torch.float32, device=device)
+            per_protocol_losses: Dict[str, float] = {}
+
+            for protocol_id, (x_this, y_this) in grouped_xy.items():
+                z_hat = self.shared_encoder(x_this)
+                heads = self.protocol_sink_models[protocol_id]
+
+                if y_this.shape[1] != len(heads):
+                    raise ValueError(
+                        f"Output dimension mismatch for protocol {protocol_id!r}: "
+                        f"y dim={y_this.shape[1]}, n_heads={len(heads)}"
+                    )
+
+                protocol_loss = torch.tensor(0.0, dtype=torch.float32, device=device)
+                for j, head in enumerate(heads):
+                    y_j = y_this[:, j:j + 1]
+                    head.set_train_data(x=z_hat, y=y_j, strict=False)
+
+                    head.gp.train()
+                    head.likelihood.train()
+
+                    output = head.gp(z_hat)
+                    mll = head.marginal_log_likelihood()
+                    loss_j = -mll(output, head.gp.train_targets)
+
+                    protocol_loss = protocol_loss + loss_j
+
+                joint_loss = joint_loss + protocol_loss
+                per_protocol_losses[protocol_id] = float(protocol_loss.detach().cpu().item())
+
+            latent_loss = torch.tensor(0.0, dtype=torch.float32, device=device)
+            if self.use_true_latent_supervision:
+                if all_x is None or all_true_z is None:
+                    raise RuntimeError(
+                        "use_true_latent_supervision=True but latent targets are missing."
+                    )
+                z_pred_all = self.shared_encoder(all_x)
+                latent_loss = F.mse_loss(z_pred_all, all_true_z)
+                joint_loss = joint_loss + float(self.latent_supervision_weight) * latent_loss
+
+            joint_loss.backward()
+
+            if config.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    self._unique_trainable_parameters(),
+                    max_norm=float(config.grad_clip_norm),
+                )
+
+            opt.step()
+
+            last_joint_loss = float(joint_loss.detach().cpu().item())
+            last_latent_loss = float(latent_loss.detach().cpu().item())
+
+            row: Dict[str, float] = {
+                "step": float(step),
+                "joint_loss": float(last_joint_loss),
+            }
+            if self.use_true_latent_supervision:
+                row["latent_supervision_loss"] = float(last_latent_loss)
+            for protocol_id, loss_val in per_protocol_losses.items():
+                row[f"{protocol_id}_loss"] = float(loss_val)
+            history.append(row)
+
+            if bool(config.verbose) and (step == 1 or step == int(config.n_steps)):
+                print(
+                    f"[multihead_dkl] step={step} "
+                    f"joint_loss={last_joint_loss:.6f}"
+                    + (
+                        f" latent_supervision_loss={last_latent_loss:.6f}"
+                        if self.use_true_latent_supervision
+                        else ""
+                    )
+                )
+
+            should_eval_val = (
+                val_samples is not None
+                and len(val_samples) > 0
+                and int(config.val_every) > 0
+                and (step % int(config.val_every) == 0 or step == int(config.n_steps))
+            )
+
+            if should_eval_val:
+                val_eval = self.evaluate_protocol_dataset(
+                    protocols=protocols,
+                    samples=val_samples,
+                    config=config,
+                )
+                val_loss = float(val_eval.loss)
+
+                if best_val_loss is None or val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_step = int(step)
+                    best_state_dict = copy.deepcopy(self.state_dict())
+
+        if best_state_dict is not None:
+            self.load_state_dict(best_state_dict)
+
+        final_train_eval = self.evaluate_protocol_dataset(
+            protocols=protocols,
+            samples=train_samples,
+            config=config,
+        )
+        final_train_loss = float(final_train_eval.loss)
+
+        final_val_loss: Optional[float] = None
+        if val_samples is not None and len(val_samples) > 0:
+            final_val_eval = self.evaluate_protocol_dataset(
+                protocols=protocols,
+                samples=val_samples,
+                config=config,
+            )
+            final_val_loss = float(final_val_eval.loss)
+            if best_val_loss is None:
+                best_val_loss = final_val_loss
+
+        return ProtocolTrainingResult(
+            optimizer=None,
+            history=history,
+            best_step=int(best_step),
+            best_val_loss=best_val_loss,
+            final_train_loss=final_train_loss,
+            final_val_loss=final_val_loss,
+            best_state_dict=best_state_dict,
+        )
 
     @torch.no_grad()
     def evaluate_protocol_dataset(
@@ -597,8 +779,6 @@ class MultiHeadNodewiseDKL(nn.Module):
             )
 
         device = self._device()
-        self.eval()
-
         grouped: Dict[str, List[BenchmarkSample]] = {}
         for sample in samples:
             grouped.setdefault(sample.protocol_id, []).append(sample)
@@ -609,6 +789,9 @@ class MultiHeadNodewiseDKL(nn.Module):
         total_count = 0
 
         for protocol_id, samples_this_protocol in grouped.items():
+            if protocol_id not in protocols:
+                raise KeyError(f"Unknown protocol_id {protocol_id!r} in evaluation.")
+
             protocol = protocols[protocol_id]
             x = _stack_rows(
                 [
@@ -651,6 +834,7 @@ class MultiHeadNodewiseDKL(nn.Module):
             total_count += n_this
 
         total_loss = total_weighted_loss / max(total_count, 1)
+
         return ProtocolEvaluationResult(
             loss=float(total_loss),
             loss_by_protocol=loss_by_protocol,
@@ -658,84 +842,8 @@ class MultiHeadNodewiseDKL(nn.Module):
             n_total=total_count,
         )
 
-    def fit_protocol_dataset(
-        self,
-        *,
-        protocols: Mapping[str, ProtocolSpec],
-        train_samples: Sequence[BenchmarkSample],
-        val_samples: Optional[Sequence[BenchmarkSample]],
-        config: ProtocolTrainingConfig,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-    ) -> ProtocolTrainingResult:
-        del optimizer
 
-        if len(train_samples) == 0:
-            raise ValueError("train_samples must be non-empty")
-
-        device = self._device()
-        protocol_map = dict(protocols)
-
-        upstream_x, upstream_z, sink_tensors = self._problem1a_fit_datasets(
-            protocols=protocol_map,
-            train_samples=train_samples,
-            device=device,
-        )
-
-        history: List[Dict[str, float]] = []
-
-        # shared upstream: x -> z (vector output)
-        for d, model in enumerate(self.shared_upstream_model.output_models):
-            metrics = model.fit_exact_gp(
-                x=upstream_x,
-                y=upstream_z[:, d : d + 1],
-                n_steps=int(config.n_steps),
-                lr=float(config.lr),
-                weight_decay=float(config.weight_decay),
-                grad_clip_norm=config.grad_clip_norm,
-                verbose=bool(config.verbose),
-                prefix=f"shared_upstream_dim_{d}",
-            )
-            history.append({"stage": f"shared_upstream_dim_{d}", **metrics})
-
-        # protocol-specific observer: z -> y
-        for protocol_id, (z_train, y_train) in sink_tensors.items():
-            sink_model = self._ensure_protocol_sink_model(protocol_id)
-            sink_metrics = sink_model.fit_exact_gp(
-                x=z_train,
-                y=y_train,
-                n_steps=int(config.n_steps),
-                lr=float(config.lr),
-                weight_decay=float(config.weight_decay),
-                grad_clip_norm=config.grad_clip_norm,
-                verbose=bool(config.verbose),
-                prefix=f"{protocol_id}_observer",
-            )
-            history.append({"stage": f"{protocol_id}_observer", **sink_metrics})
-
-        final_train_eval = self.evaluate_protocol_dataset(
-            protocols=protocol_map,
-            samples=train_samples,
-            config=config,
-        )
-        final_train_loss = float(final_train_eval.loss)
-
-        final_val_loss: Optional[float] = None
-        best_val_loss: Optional[float] = None
-        if val_samples is not None and len(val_samples) > 0:
-            val_eval = self.evaluate_protocol_dataset(
-                protocols=protocol_map,
-                samples=val_samples,
-                config=config,
-            )
-            final_val_loss = float(val_eval.loss)
-            best_val_loss = final_val_loss
-
-        return ProtocolTrainingResult(
-            optimizer=None,
-            history=history,
-            best_step=int(config.n_steps),
-            best_val_loss=best_val_loss,
-            final_train_loss=final_train_loss,
-            final_val_loss=final_val_loss,
-            best_state_dict=None,
-        )
+__all__ = [
+    "NodewiseDKLRegressor",
+    "MultiHeadNodewiseDKL",
+]
