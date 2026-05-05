@@ -36,7 +36,7 @@ python -m partial_alfn.experiments.freesolv3_runner --help
 python -m ofml_alfn.experiments.run_protocol1a_fantasy --help
 ```
 
-## Running `partial_alfn`
+## Running `partial_alfn` (Probelm Setting A)
 
 ### Single run: partial observation, DKL
 
@@ -93,7 +93,7 @@ You can inspect the comparison script CLI with:
 python compare_two_methods.py --help
 ```
 
-## Running `ofml_alfn`
+## Running `ofml_alfn` (Probelm Setting B)
 
 ### Single run: all protocols, DKL, fantasy sampling
 
