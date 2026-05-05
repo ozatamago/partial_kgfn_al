@@ -1,9 +1,7 @@
 name: pKGFN
 channels:
   - pytorch
-  - gpytorch
   - conda-forge
-  - anaconda
   - defaults
 dependencies:
   - python=3.9
@@ -12,7 +10,10 @@ dependencies:
   - pandas
   - matplotlib
   - jupyter
+  - pytorch
+  - torchvision
+  - torchaudio
   - pip
   - pip:
-    - botorch==0.8.4
-    - gpytorch==1.10
+      - botorch==0.8.4
+      - gpytorch==1.10
