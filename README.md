@@ -1,4 +1,4 @@
-# Bayesian Optimization of Function Networks with Partial Evaluations
+# Active Learning of Function Networks with Partial Evaluations
 
 ## Software requirements
 
