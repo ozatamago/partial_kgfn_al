@@ -1,5 +1,10 @@
 # Active Learning of Function Networks with Partial Evaluations
 
+## Relation to the previous project
+
+This repository extends the previous project on Bayesian Optimization of Function Networks.  
+If you would like to make this relation explicit, add a link here to the previous repository or paper.
+
 ## Software requirements
 
 The entire codebase is written in Python. Package requirements are as follows:
