@@ -125,9 +125,19 @@ def _run_candidate_pool_scope(summary: Dict[str, Any]) -> Optional[str]:
 
 def _scan_combo_dirs(root_dir: Path) -> List[Path]:
     combo_dirs = []
-    for p in sorted(root_dir.glob("costs_*__sims_*")):
-        if p.is_dir():
-            combo_dirs.append(p)
+
+    patterns = [
+        "costs_*__sims_*",              # old naming
+        "costs_*__noise_*__scale_*",   # ellipsoid naming
+    ]
+
+    seen = set()
+    for pattern in patterns:
+        for p in sorted(root_dir.glob(pattern)):
+            if p.is_dir() and p not in seen:
+                combo_dirs.append(p)
+                seen.add(p)
+
     return combo_dirs
 
 

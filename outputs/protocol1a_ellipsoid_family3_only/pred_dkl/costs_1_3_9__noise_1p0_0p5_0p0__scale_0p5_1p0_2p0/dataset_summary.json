@@ -1,0 +1,153 @@
+{
+  "build_summary": {
+    "problem_name": "problem_1a_ellipsoid",
+    "protocol_ids": [
+      "protocol_1",
+      "protocol_2",
+      "protocol_3"
+    ],
+    "target_protocol_id": "protocol_3",
+    "n_samples_total": 672,
+    "split_sizes": {
+      "pretrain_protocol_1": 128,
+      "pretrain_protocol_2": 128,
+      "adapt_protocol_3": 32,
+      "val_protocol_3": 128,
+      "test_protocol_3": 256,
+      "pretrain_all_sources": 256
+    },
+    "similarities_to_target": [
+      0.4,
+      0.7,
+      1.0
+    ],
+    "observer_scales": [
+      0.5,
+      1.0,
+      2.0
+    ],
+    "observer_output_dims": [
+      2,
+      3,
+      3
+    ]
+  },
+  "config": {
+    "input_dim": 3,
+    "latent_dim": 4,
+    "condition_keys": [
+      "x0",
+      "x1",
+      "x2"
+    ],
+    "protocol_ids": [
+      "protocol_1",
+      "protocol_2",
+      "protocol_3"
+    ],
+    "observer_module_keys": [
+      "observer_1",
+      "observer_2",
+      "observer_3"
+    ],
+    "observer_output_dims": [
+      2,
+      3,
+      3
+    ],
+    "observer_index_tuples": [
+      [
+        0,
+        3
+      ],
+      [
+        1,
+        2,
+        3
+      ],
+      [
+        0,
+        1,
+        2
+      ]
+    ],
+    "similarities_to_target": [
+      0.4,
+      0.7,
+      1.0
+    ],
+    "observer_scales": [
+      0.5,
+      1.0,
+      2.0
+    ],
+    "protocol_costs": [
+      1.0,
+      3.0,
+      9.0
+    ],
+    "n_pretrain_p1": 128,
+    "n_pretrain_p2": 128,
+    "n_adapt_p3": 32,
+    "n_val_p3": 128,
+    "n_test_p3": 256,
+    "chart_radius": 0.9,
+    "ellipsoid_center": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "ellipsoid_scales": [
+      1.0,
+      1.2,
+      0.8,
+      1.5
+    ],
+    "chart_sign": 1,
+    "dataset_seed": 0,
+    "target_noise_std": 0.0,
+    "source_noise_stds": [
+      1.0,
+      0.5
+    ],
+    "add_observation_noise_to_train": true,
+    "add_observation_noise_to_eval": false,
+    "save_dir": null,
+    "save_filename": "problem_1a_ellipsoid_dataset.pt",
+    "metadata": {}
+  },
+  "metadata": {
+    "problem_name": "problem_1a_ellipsoid",
+    "protocol_costs": [
+      1.0,
+      3.0,
+      9.0
+    ],
+    "observer_scales": [
+      0.5,
+      1.0,
+      2.0
+    ],
+    "observer_output_dims": [
+      2,
+      3,
+      3
+    ],
+    "chart_radius": 0.9,
+    "ellipsoid_center": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "ellipsoid_scales": [
+      1.0,
+      1.2,
+      0.8,
+      1.5
+    ],
+    "chart_sign": 1,
+    "common_padded_output_dim": 3
+  }
+}
